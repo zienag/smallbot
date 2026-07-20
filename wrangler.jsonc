@@ -1,0 +1,18 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "smallbot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  "triggers": {
+    "crons": ["*/15 * * * *"]
+  },
+  "kv_namespaces": [
+    { "binding": "RELEASES", "id": "2254c70148884faa8d27f6fd73e08e81" }
+  ],
+  "vars": {
+    "TELEGRAM_CHAT_ID": "@claudecode_changelog",
+    "TELEGRAM_CODEX_CHAT_ID": "@codex_changelog",
+    "TELEGRAM_MODELS_CHAT_ID": "@model_drops",
+    "DRY_RUN": "0"
+  }
+}

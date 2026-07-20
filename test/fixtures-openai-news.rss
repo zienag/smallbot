@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?><rss xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:content="http://purl.org/rss/1.0/modules/content/" xmlns:atom="http://www.w3.org/2005/Atom" version="2.0">
+    <channel>
+        <title><![CDATA[OpenAI News]]></title>
+        <description><![CDATA[The OpenAI blog]]></description>
+        <link>https://openai.com/news</link>
+        <generator>OpenAI</generator>
+        <lastBuildDate>Mon, 20 Jul 2026 14:23:45 GMT</lastBuildDate>
+        <atom:link href="https://openai.com/news/rss" rel="self" type="application/rss+xml"/>
+        <item>
+            <title><![CDATA[A scorecard for the AI age]]></title>
+            <description><![CDATA[Sarah Friar, CFO of OpenAI, introduces a practical AI scorecard to measure ROI through useful work, cost per successful task, dependability, and return on compute. ]]></description>
+            <link>https://openai.com/index/a-scorecard-for-the-ai-age</link>
+            <guid isPermaLink="true">https://openai.com/index/a-scorecard-for-the-ai-age</guid>
+            <category><![CDATA[Company]]></category>
+            <pubDate>Fri, 17 Jul 2026 10:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[Why teens deserve access to safe AI]]></title>
+            <description><![CDATA[Learn how OpenAI is making ChatGPT safer for teens with age-appropriate protections, learning tools, parental controls, and expert partnerships.]]></description>
+            <link>https://openai.com/index/why-teens-deserve-access-safe-ai</link>
+            <guid isPermaLink="true">https://openai.com/index/why-teens-deserve-access-safe-ai</guid>
+            <category><![CDATA[Safety]]></category>
+            <pubDate>Thu, 16 Jul 2026 16:00:00 GMT</pubDate>
+        </item>
+<item>
+            <title><![CDATA[How Cars24 scales conversations and builds faster with OpenAI]]></title>
+            <description><![CDATA[Cars24 uses OpenAI-powered voice and chat agents to handle 1M+ monthly conversation minutes, recover 12% of lost leads, and bring agentic workflows to teams across the company.]]></description>
+            <link>https://openai.com/index/cars24</link>
+            <guid isPermaLink="true">https://openai.com/index/cars24</guid>
+            <pubDate>Thu, 16 Jul 2026 00:00:00 GMT</pubDate>
+        </item>
+    </channel>
+</rss>

@@ -1,0 +1,127 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<feed xmlns="http://www.w3.org/2005/Atom" xmlns:media="http://search.yahoo.com/mrss/" xml:lang="en-US">
+  <id>tag:github.com,2008:https://github.com/openai/codex/releases</id>
+  <link type="text/html" rel="alternate" href="https://github.com/openai/codex/releases"/>
+  <link type="application/atom+xml" rel="self" href="https://github.com/openai/codex/releases.atom"/>
+  <title>Release notes from codex</title>
+  <updated>2026-07-18T21:38:51Z</updated>
+  <entry>
+    <id>tag:github.com,2008:Repository/965415649/rust-v0.145.0-alpha.24</id>
+    <updated>2026-07-18T22:29:36Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/openai/codex/releases/tag/rust-v0.145.0-alpha.24"/>
+    <title>0.145.0-alpha.24</title>
+    <content type="html">&lt;p&gt;Release 0.145.0-alpha.24&lt;/p&gt;</content>
+    <author>
+      <name>github-actions[bot]</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/in/15368?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/965415649/rust-v0.144.6</id>
+    <updated>2026-07-18T13:53:50Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/openai/codex/releases/tag/rust-v0.144.6"/>
+    <title>0.144.6</title>
+    <content type="html">&lt;h2&gt;Bug Fixes&lt;/h2&gt;
+&lt;ul&gt;
+&lt;li&gt;Refreshed bundled instructions for GPT-5.6 Sol, Terra, and Luna, and corrected their context windows to 272,000 tokens. (&lt;a class=&quot;issue-link js-issue-link&quot; data-error-text=&quot;Failed to load title&quot; data-id=&quot;4917359031&quot; data-permission-text=&quot;Title is private&quot; data-url=&quot;https://github.com/openai/codex/issues/33972&quot; data-hovercard-type=&quot;pull_request&quot; data-hovercard-url=&quot;/openai/codex/pull/33972/hovercard&quot; href=&quot;https://github.com/openai/codex/pull/33972&quot;&gt;#33972&lt;/a&gt;, &lt;a class=&quot;issue-link js-issue-link&quot; data-error-text=&quot;Failed to load title&quot; data-id=&quot;4918269341&quot; data-permission-text=&quot;Title is private&quot; data-url=&quot;https://github.com/openai/codex/issues/34009&quot; data-hovercard-type=&quot;pull_request&quot; data-hovercard-url=&quot;/openai/codex/pull/34009/hovercard&quot; href=&quot;https://github.com/openai/codex/pull/34009&quot;&gt;#34009&lt;/a&gt;)&lt;/li&gt;
+&lt;/ul&gt;
+&lt;h2&gt;Changelog&lt;/h2&gt;
+&lt;p&gt;Full Changelog: &lt;a class=&quot;commit-link&quot; href=&quot;https://github.com/openai/codex/compare/rust-v0.144.5...rust-v0.144.6&quot;&gt;&lt;tt&gt;rust-v0.144.5...rust-v0.144.6&lt;/tt&gt;&lt;/a&gt;&lt;/p&gt;
+&lt;ul&gt;
+&lt;li&gt;&lt;a class=&quot;issue-link js-issue-link&quot; data-error-text=&quot;Failed to load title&quot; data-id=&quot;4917359031&quot; data-permission-text=&quot;Title is private&quot; data-url=&quot;https://github.com/openai/codex/issues/33972&quot; data-hovercard-type=&quot;pull_request&quot; data-hovercard-url=&quot;/openai/codex/pull/33972/hovercard&quot; href=&quot;https://github.com/openai/codex/pull/33972&quot;&gt;#33972&lt;/a&gt; Backport refreshed bundled model metadata to 0.144 &lt;a class=&quot;user-mention notranslate&quot; data-hovercard-type=&quot;user&quot; data-hovercard-url=&quot;/users/sayan-oai/hovercard&quot; data-octo-click=&quot;hovercard-link-click&quot; data-octo-dimensions=&quot;link_type:self&quot; href=&quot;https://github.com/sayan-oai&quot;&gt;@sayan-oai&lt;/a&gt;&lt;/li&gt;
+&lt;li&gt;&lt;a class=&quot;issue-link js-issue-link&quot; data-error-text=&quot;Failed to load title&quot; data-id=&quot;4918269341&quot; data-permission-text=&quot;Title is private&quot; data-url=&quot;https://github.com/openai/codex/issues/34009&quot; data-hovercard-type=&quot;pull_request&quot; data-hovercard-url=&quot;/openai/codex/pull/34009/hovercard&quot; href=&quot;https://github.com/openai/codex/pull/34009&quot;&gt;#34009&lt;/a&gt; Narrow 0.144 hotfix to GPT-5.6 prompts and context &lt;a class=&quot;user-mention notranslate&quot; data-hovercard-type=&quot;user&quot; data-hovercard-url=&quot;/users/sayan-oai/hovercard&quot; data-octo-click=&quot;hovercard-link-click&quot; data-octo-dimensions=&quot;link_type:self&quot; href=&quot;https://github.com/sayan-oai&quot;&gt;@sayan-oai&lt;/a&gt;&lt;/li&gt;
+&lt;/ul&gt;</content>
+    <author>
+      <name>github-actions[bot]</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/in/15368?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/965415649/rust-v0.145.0-alpha.23</id>
+    <updated>2026-07-17T22:43:14Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/openai/codex/releases/tag/rust-v0.145.0-alpha.23"/>
+    <title>0.145.0-alpha.23</title>
+    <content type="html">&lt;p&gt;Release 0.145.0-alpha.23&lt;/p&gt;</content>
+    <author>
+      <name>github-actions[bot]</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/in/15368?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/965415649/rust-v0.145.0-alpha.22</id>
+    <updated>2026-07-17T17:32:15Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/openai/codex/releases/tag/rust-v0.145.0-alpha.22"/>
+    <title>0.145.0-alpha.22</title>
+    <content type="html">&lt;p&gt;Release 0.145.0-alpha.22&lt;/p&gt;</content>
+    <author>
+      <name>github-actions[bot]</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/in/15368?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/965415649/rust-v0.145.0-alpha.21</id>
+    <updated>2026-07-17T14:42:05Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/openai/codex/releases/tag/rust-v0.145.0-alpha.21"/>
+    <title>rust-v0.145.0-alpha.21</title>
+    <content type="html">&lt;p&gt;Release 0.145.0-alpha.21&lt;/p&gt;</content>
+    <author>
+      <name>shijie-oai</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/u/235382242?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/965415649/python-v0.144.4</id>
+    <updated>2026-07-17T22:58:10Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/openai/codex/releases/tag/python-v0.144.4"/>
+    <title>python-v0.144.4</title>
+    <content type="html">&lt;p&gt;Allow stable Python SDK releases&lt;/p&gt;</content>
+    <author>
+      <name>aibrahim-oai</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/u/219906144?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/965415649/rust-v0.145.0-alpha.20</id>
+    <updated>2026-07-17T03:07:19Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/openai/codex/releases/tag/rust-v0.145.0-alpha.20"/>
+    <title>0.145.0-alpha.20</title>
+    <content type="html">&lt;p&gt;Release 0.145.0-alpha.20&lt;/p&gt;</content>
+    <author>
+      <name>github-actions[bot]</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/in/15368?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/965415649/rust-v0.145.0-alpha.19</id>
+    <updated>2026-07-16T22:13:47Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/openai/codex/releases/tag/rust-v0.145.0-alpha.19"/>
+    <title>0.145.0-alpha.19</title>
+    <content type="html">&lt;p&gt;Release 0.145.0-alpha.19&lt;/p&gt;</content>
+    <author>
+      <name>github-actions[bot]</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/in/15368?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/965415649/rust-v0.145.0-alpha.18</id>
+    <updated>2026-07-16T18:15:04Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/openai/codex/releases/tag/rust-v0.145.0-alpha.18"/>
+    <title>0.145.0-alpha.18</title>
+    <content type="html">&lt;p&gt;Release 0.145.0-alpha.18&lt;/p&gt;</content>
+    <author>
+      <name>github-actions[bot]</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/in/15368?s=60&amp;v=4"/>
+  </entry>
+  <entry>
+    <id>tag:github.com,2008:Repository/965415649/rust-v0.145.0-alpha.17</id>
+    <updated>2026-07-16T16:43:25Z</updated>
+    <link rel="alternate" type="text/html" href="https://github.com/openai/codex/releases/tag/rust-v0.145.0-alpha.17"/>
+    <title>rust-v0.145.0-alpha.17</title>
+    <content type="html">&lt;p&gt;Release 0.145.0-alpha.17&lt;/p&gt;</content>
+    <author>
+      <name>shijie-oai</name>
+    </author>
+    <media:thumbnail height="30" width="30" url="https://avatars.githubusercontent.com/u/235382242?s=60&amp;v=4"/>
+  </entry>
+</feed>
