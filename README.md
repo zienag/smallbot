@@ -1,4 +1,4 @@
-# smallbot
+<img src=".github/social-preview.svg" alt="smallbot" width="100%">
 
 A Cloudflare Worker that watches AI release feeds and blogs, digests them with
 Claude, and posts to Telegram channels as **@bipozavr_bot**. Beep!
