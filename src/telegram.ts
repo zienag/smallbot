@@ -44,6 +44,7 @@ export async function sendMessage(
   botToken: string,
   chatId: string,
   text: string,
+  opts: { silent?: boolean } = {},
 ): Promise<number> {
   const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: "POST",
@@ -53,6 +54,7 @@ export async function sendMessage(
       text,
       parse_mode: "HTML",
       link_preview_options: { is_disabled: true },
+      disable_notification: opts.silent ?? false,
     }),
   });
   if (!res.ok) {
@@ -60,6 +62,22 @@ export async function sendMessage(
   }
   const data = (await res.json()) as { result?: { message_id?: number } };
   return data.result?.message_id ?? 0;
+}
+
+/** Needs the bot to be a channel admin with the pin right. */
+export async function pinMessage(
+  botToken: string,
+  chatId: string,
+  messageId: number,
+): Promise<void> {
+  const res = await fetch(`https://api.telegram.org/bot${botToken}/pinChatMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+  });
+  if (!res.ok) {
+    throw new Error(`telegram pinChatMessage failed: ${res.status} ${await res.text()}`);
+  }
 }
 
 export interface AlbumPhoto {

@@ -1,3 +1,11 @@
+import {
+  ANTHROPIC_BLOG_SEEN_KEY,
+  type BlogEntry,
+  type Tier,
+  digestBlogPost,
+  fetchAllBlogEntries,
+  formatBlogPost,
+} from "./blogs";
 import { fetchChangelog } from "./changelog";
 import { fetchCodexReleases } from "./codex";
 import {
@@ -7,7 +15,9 @@ import {
   listModels,
 } from "./models";
 import {
+  OPENAI_BLOG_SEEN_KEY,
   OPENAI_SEEN_KEY,
+  classifyTier,
   fetchOpenAiNews,
   formatOpenAiModelPost,
   isModelRelease,
@@ -18,6 +28,7 @@ import {
   CAPTION_LIMIT,
   buildPost,
   changelogAnchorUrl,
+  pinMessage,
   sendAlbum,
   sendMessage,
 } from "./telegram";
@@ -32,6 +43,8 @@ export interface Env {
   // A source with no channel configured is simply off.
   TELEGRAM_CODEX_CHAT_ID?: string;
   TELEGRAM_MODELS_CHAT_ID?: string;
+  TELEGRAM_ANTHROPIC_BLOG_CHAT_ID?: string;
+  TELEGRAM_OPENAI_BLOG_CHAT_ID?: string;
   DRY_RUN?: string;
 }
 
@@ -214,6 +227,115 @@ async function watchOpenAiNews(env: Env, dryRun: boolean): Promise<string> {
   return `openai: processed ${fresh.length}, posted ${posted.length ? posted.join(" | ") : "none"}${dryRun ? " (dry)" : ""}`;
 }
 
+// The tier tunes delivery: minor posts silently, major additionally pins.
+async function sendTiered(env: Env, chatId: string, post: string, tier: Tier): Promise<void> {
+  const messageId = await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, post, {
+    silent: tier === "minor",
+  });
+  if (tier === "major") {
+    // The pin is nice-to-have; the post is already out.
+    try {
+      await pinMessage(env.TELEGRAM_BOT_TOKEN, chatId, messageId);
+    } catch (err) {
+      console.log(`pin failed in ${chatId}: ${err}`);
+    }
+  }
+}
+
+const MAX_BLOG_POSTS_PER_TICK = 5;
+
+async function watchAnthropicBlogs(env: Env, dryRun: boolean): Promise<string> {
+  const entries = await fetchAllBlogEntries();
+  const seenRaw = await env.RELEASES.get(ANTHROPIC_BLOG_SEEN_KEY);
+  if (!seenRaw) {
+    if (dryRun) return `blog: would seed ${entries.length} seen (dry)`;
+    await env.RELEASES.put(ANTHROPIC_BLOG_SEEN_KEY, JSON.stringify(entries.map((e) => e.url)));
+    return `blog: seeded ${entries.length} seen, nothing posted`;
+  }
+  const seen = new Set(JSON.parse(seenRaw) as string[]);
+  // Oldest first; the cap bounds LLM calls per tick, the tail catches up next tick.
+  const fresh = entries
+    .filter((e) => !seen.has(e.url))
+    .reverse()
+    .slice(0, MAX_BLOG_POSTS_PER_TICK);
+  if (fresh.length === 0) return "blog: nothing new";
+
+  const posted: string[] = [];
+  for (const entry of fresh) {
+    const digest = await digestBlogPost(env.ANTHROPIC_API_KEY, env.RELEASES, entry);
+    const post = formatBlogPost(entry, digest);
+    if (dryRun) {
+      console.log(`DRY_RUN: would post [${digest.tier}] ${entry.url}:\n${post}`);
+    } else {
+      await sendTiered(env, env.TELEGRAM_ANTHROPIC_BLOG_CHAT_ID!, post, digest.tier);
+      seen.add(entry.url);
+      await env.RELEASES.put(ANTHROPIC_BLOG_SEEN_KEY, JSON.stringify([...seen]));
+    }
+    posted.push(`${entry.url} [${digest.tier}]`);
+  }
+  return `blog: posted ${posted.join(", ")}${dryRun ? " (dry)" : ""}`;
+}
+
+async function watchOpenAiBlog(env: Env, dryRun: boolean): Promise<string> {
+  const items = await fetchOpenAiNews();
+  const seenRaw = await env.RELEASES.get(OPENAI_BLOG_SEEN_KEY);
+  if (!seenRaw) {
+    if (dryRun) return `openai_blog: would seed ${items.length} seen (dry)`;
+    await env.RELEASES.put(OPENAI_BLOG_SEEN_KEY, JSON.stringify(items.map((i) => i.guid)));
+    return `openai_blog: seeded ${items.length} seen, nothing posted`;
+  }
+  const seen = new Set(JSON.parse(seenRaw) as string[]);
+  const fresh = items
+    .filter((i) => !seen.has(i.guid))
+    .reverse()
+    .slice(0, MAX_CLASSIFY_PER_TICK);
+  if (fresh.length === 0) return "openai_blog: nothing new";
+
+  const posted: string[] = [];
+  for (const item of fresh) {
+    const tier = await classifyTier(env.ANTHROPIC_API_KEY, env.RELEASES, item);
+    const post = formatOpenAiModelPost(item);
+    if (dryRun) {
+      console.log(`DRY_RUN: would post [${tier}] OpenAI blog item:\n${post}`);
+    } else {
+      await sendTiered(env, env.TELEGRAM_OPENAI_BLOG_CHAT_ID!, post, tier);
+      seen.add(item.guid);
+      await env.RELEASES.put(OPENAI_BLOG_SEEN_KEY, JSON.stringify([...seen]));
+    }
+    posted.push(`${item.title} [${tier}]`);
+  }
+  return `openai_blog: posted ${posted.join(" | ")}${dryRun ? " (dry)" : ""}`;
+}
+
+// Test hook /run?source=blog&version=<url substring>: digests and (outside
+// dry) posts one blog entry, never touches KV.
+async function forceBlogEntry(env: Env, query: string, dryRun: boolean): Promise<string> {
+  const q = query.toLowerCase();
+  const entry = (await fetchAllBlogEntries()).find((e) => e.url.toLowerCase().includes(q));
+  if (!entry) return `blog: no post matching ${query}`;
+  const digest = await digestBlogPost(env.ANTHROPIC_API_KEY, env.RELEASES, entry);
+  const post = formatBlogPost(entry, digest);
+  if (dryRun) return `blog: ${entry.url} tier=${digest.tier} (dry)\n---\n${post}`;
+  if (!env.TELEGRAM_ANTHROPIC_BLOG_CHAT_ID) return "blog: no chat configured";
+  await sendTiered(env, env.TELEGRAM_ANTHROPIC_BLOG_CHAT_ID, post, digest.tier);
+  return `blog: force-posted ${entry.url} [${digest.tier}]`;
+}
+
+// Test hook /run?source=openai_blog&version=<title substring>, never touches KV.
+async function forceOpenAiBlogItem(env: Env, query: string, dryRun: boolean): Promise<string> {
+  const q = query.toLowerCase();
+  const item = (await fetchOpenAiNews()).find(
+    (i) => i.title.toLowerCase().includes(q) || i.guid.includes(query),
+  );
+  if (!item) return `openai_blog: no item matching ${query}`;
+  const tier = await classifyTier(env.ANTHROPIC_API_KEY, env.RELEASES, item);
+  const post = formatOpenAiModelPost(item);
+  if (dryRun) return `openai_blog: "${item.title}" tier=${tier} (dry)\n---\n${post}`;
+  if (!env.TELEGRAM_OPENAI_BLOG_CHAT_ID) return "openai_blog: no chat configured";
+  await sendTiered(env, env.TELEGRAM_OPENAI_BLOG_CHAT_ID, post, tier);
+  return `openai_blog: force-posted "${item.title}" [${tier}]`;
+}
+
 // Test hook /run?source=openai&version=<title substring>: classifies and
 // (outside dry) posts one feed item, never touches KV.
 async function forceOpenAiItem(env: Env, query: string, dryRun: boolean): Promise<string> {
@@ -260,6 +382,8 @@ export async function runPipeline(
   if (opts.forceVersion) {
     if (opts.source === "models") return forceModelAnnouncement(env, opts.forceVersion, dryRun);
     if (opts.source === "openai") return forceOpenAiItem(env, opts.forceVersion, dryRun);
+    if (opts.source === "blog") return forceBlogEntry(env, opts.forceVersion, dryRun);
+    if (opts.source === "openai_blog") return forceOpenAiBlogItem(env, opts.forceVersion, dryRun);
     const source = sources.find((s) => s.key === (opts.source ?? "claude"));
     if (!source) return `unknown source ${opts.source}`;
     if (!source.chatId && !dryRun) return `${source.key}: no chat configured`;
@@ -290,6 +414,20 @@ export async function runPipeline(
       statuses.push(await watchOpenAiNews(env, dryRun));
     } catch (err) {
       statuses.push(`openai: failed: ${err}`);
+    }
+  }
+  if (env.TELEGRAM_ANTHROPIC_BLOG_CHAT_ID) {
+    try {
+      statuses.push(await watchAnthropicBlogs(env, dryRun));
+    } catch (err) {
+      statuses.push(`blog: failed: ${err}`);
+    }
+  }
+  if (env.TELEGRAM_OPENAI_BLOG_CHAT_ID) {
+    try {
+      statuses.push(await watchOpenAiBlog(env, dryRun));
+    } catch (err) {
+      statuses.push(`openai_blog: failed: ${err}`);
     }
   }
   return statuses.join("\n");

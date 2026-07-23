@@ -1,3 +1,4 @@
+import { TIER_CRITERIA, type Tier } from "./blogs";
 import { structuredFromPrompt } from "./summarize";
 import { escapeHtml } from "./telegram";
 
@@ -5,6 +6,7 @@ import { escapeHtml } from "./telegram";
 // RSS is open — it is both the trigger and the post content.
 export const OPENAI_RSS_URL = "https://openai.com/news/rss.xml";
 export const OPENAI_SEEN_KEY = "openai_news_seen";
+export const OPENAI_BLOG_SEEN_KEY = "openai_blog_seen";
 
 export interface NewsItem {
   title: string;
@@ -69,6 +71,33 @@ export async function isModelRelease(
     },
   );
   return verdict.isModelRelease;
+}
+
+// The blog channel reposts every feed item; the tier only tunes delivery
+// (pin / sound / silent). Title+description is all we have — pages are blocked.
+const TIER_PROMPT = (item: NewsItem) => `\
+You are triaging an item from the OpenAI news feed for a Telegram channel \
+whose readers are engineers who follow AI news daily. Only the title and \
+description are available.
+
+Title: ${item.title}
+Description: ${item.description}
+
+Assign the item an importance tier:
+${TIER_CRITERIA}`;
+
+export async function classifyTier(
+  apiKey: string,
+  kv: KVNamespace,
+  item: NewsItem,
+): Promise<Tier> {
+  const verdict = await structuredFromPrompt<{ tier: Tier }>(apiKey, kv, TIER_PROMPT(item), {
+    type: "object",
+    properties: { tier: { type: "string", enum: ["major", "normal", "minor"] } },
+    required: ["tier"],
+    additionalProperties: false,
+  });
+  return verdict.tier;
 }
 
 export function formatOpenAiModelPost(item: NewsItem): string {

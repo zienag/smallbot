@@ -13,6 +13,8 @@
     "TELEGRAM_CHAT_ID": "@claudecode_changelog",
     "TELEGRAM_CODEX_CHAT_ID": "@codex_changelog",
     "TELEGRAM_MODELS_CHAT_ID": "@model_drops",
+    "TELEGRAM_ANTHROPIC_BLOG_CHAT_ID": "@anthropic_blogs",
+    "TELEGRAM_OPENAI_BLOG_CHAT_ID": "@openai_blogs",
     "DRY_RUN": "0"
   }
 }

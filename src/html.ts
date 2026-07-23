@@ -25,9 +25,14 @@ export function htmlToText(html: string): string {
     .join("\n");
 }
 
-/** Article text from a full HTML page (first <article>), null if absent. */
+/**
+ * Article text from a full HTML page: first <article>, else <main>
+ * (claude.com blog posts have no <article> tag), null if neither.
+ */
 export function articleText(page: string): string | null {
-  const article = page.match(/<article[^>]*>([\s\S]*?)<\/article>/)?.[1];
+  const article =
+    page.match(/<article[^>]*>([\s\S]*?)<\/article>/)?.[1] ??
+    page.match(/<main[^>]*>([\s\S]*?)<\/main>/)?.[1];
   if (!article) return null;
   return decodeEntities(
     article
