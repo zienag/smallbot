@@ -44,10 +44,11 @@ npx wrangler deploy
 Prod verification (dry-run exercises the full pipeline including a real LLM call, posts nothing, doesn't touch `last_posted_version`):
 
 ```sh
-curl "https://smallbot.zienag.workers.dev/run?secret=$(security find-generic-password -s smallbot -a trigger-secret -w)&version=2.1.209&dry=1"
+curl -X POST "https://smallbot.zienag.workers.dev/run?version=2.1.209&dry=1" \
+  -H "Authorization: Bearer $(security find-generic-password -s smallbot -a trigger-secret -w)"
 ```
 
-`/run` params: no `version` → normal pipeline (all sources); `version=X` → force-post one version (never touches KV); `source=claude|codex|models|openai|blog|openai_blog` → which source the forced version/id/title/url-substring belongs to; `dry=1|0` → override DRY_RUN. Dry blog responses include the tier and post text.
+`/run` is POST-only, auth via `Authorization: Bearer <TRIGGER_SECRET>` (never a query param — those end up in logs). Params: no `version` → normal pipeline (all sources); `version=X` → force-post one version (never touches KV); `source=claude|codex|models|openai|blog|openai_blog` → which source the forced version/id/title/url-substring belongs to; `dry=1|0` → override DRY_RUN. Dry blog responses include the tier and post text.
 
 After `wrangler deploy` the old instance can keep serving `/run` for up to ~a minute — a "fix didn't work" verdict right after deploying is unreliable (bit us twice), re-check before debugging.
 

@@ -441,7 +441,9 @@ export default {
   async fetch(request, env) {
     const url = new URL(request.url);
     if (url.pathname !== "/run") return new Response("not found", { status: 404 });
-    if (url.searchParams.get("secret") !== env.TRIGGER_SECRET) {
+    if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
+    // Bearer header, not a query param: query strings end up in logs and copied URLs.
+    if (request.headers.get("authorization") !== `Bearer ${env.TRIGGER_SECRET}`) {
       return new Response("forbidden", { status: 403 });
     }
     const result = await runPipeline(env, {
