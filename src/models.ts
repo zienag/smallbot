@@ -222,7 +222,7 @@ mechanisms or access schemes, caveats, incidents, odd details. Concrete \
 numbers beat adjectives. The digest is a photo caption, so it must be TIGHT: \
 each bullet under 12 words, the whole digest under 400 characters. Telegraphic \
 style is fine — drop filler words. Write model names as plain text (no \
-backticks or code formatting).`;
+backticks or code formatting). Write in English.`;
 
 /**
  * For each new model, tries to find and summarize its press release; any

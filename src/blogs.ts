@@ -99,7 +99,8 @@ ${text}
 
 Pick the 2-4 points an engineer would actually care about: concrete \
 capabilities, numbers, and takeaways, not marketing framing. Each bullet is \
-one short sentence. Wrap commands, flags, and other identifiers in backticks.
+one short sentence. Wrap commands, flags, and other identifiers in backticks. \
+Write in English.
 
 Also assign the post an importance tier:
 ${TIER_CRITERIA}`;

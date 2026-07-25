@@ -66,11 +66,30 @@ Release version: ${version}
 Release notes:
 ${notes}
 
-Pick the 2-4 most important items for an active ${product} user (new \
-capabilities and impactful fixes first; skip niche platform fixes). Each bullet \
-is one short sentence. Wrap commands, flags, env vars, and other identifiers \
-in backticks. Ignore auto-generated trailers like "Full Changelog" PR-link \
-lists.`;
+The post already carries a header with the version and a link to the \
+changelog, so the bullets are only what is worth saying beyond it.
+
+Nobody reads changelogs — that is the whole reason this channel exists. \
+Someone wakes up, flicks through their work channels and gives this post five \
+or ten seconds before getting on with a day full of other things. Three things \
+taken in at a glance is a digest that works; a dozen bullets is research \
+nobody reads, and the release may as well not have been posted. The full \
+changelog is one click away, so completeness is not this post's job and \
+nothing is lost by leaving something out. What belongs here is what would \
+actually make a developer's day better: a new capability, something that \
+removes friction they hit daily, a behaviour change that would otherwise catch \
+them out. Meticulous little correctness fixes are the changelog's business. \
+When a release is only bug fixes, one line saying so is the whole post; never \
+leave it empty, that reads as a glitch. Each bullet carries one change, \
+because two \
+crammed together get skimmed past. The reader is not deciding whether to take \
+the release, so a line telling them to update says nothing they can act on. \
+Claiming more than the notes support costs the trust that makes people read at \
+all.
+
+Each bullet is one short sentence. Wrap commands, flags, env vars, and other \
+identifiers in backticks. Ignore auto-generated trailers like "Full Changelog" \
+PR-link lists. Write in English.`;
 
 export async function summarize(
   apiKey: string,
