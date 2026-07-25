@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Cloudflare Worker (cron `*/15`) that watches release feeds and posts digests to Telegram channels as `@bipozavr_bot`. Sources (src/index.ts): Claude Code (CHANGELOG.md → `@claudecode_changelog`), Codex (GitHub Releases atom feed → `@codex_changelog`), a new-models watch → `@model_drops` (Anthropic `/v1/models` diff + OpenAI news RSS, LLM-classified), and two blog watches: Anthropic-verse (src/blogs.ts: claude.com/blog + anthropic.com/news + /engineering → `@anthropic_blogs`) and the full OpenAI news feed (src/openai_news.ts → `@openai_blogs`), each reposting everything with an LLM importance tier (major = pin, normal, minor = silent). A source whose chat-id var is unset is simply off. PLAN.md is the original design doc — partially stale (the verdict line was dropped from posts; the model is now auto-resolved, not a fixed constant).
+Cloudflare Worker (cron `*/15`) that watches release feeds and posts digests to Telegram channels as `@bipozavr_bot`. Sources (src/index.ts): Claude Code (CHANGELOG.md → `@claudecode_changelog`), Codex (GitHub Releases atom feed → `@codex_changelog`), a new-models watch → `@model_drops` (Anthropic `/v1/models` diff + OpenAI news RSS, LLM-classified), and two blog watches: Anthropic-verse (src/blogs.ts: claude.com/blog + anthropic.com/news + /engineering → `@anthropic_blogs`) and the full OpenAI news feed (src/openai_news.ts → `@openai_blogs`), each reposting everything with an LLM importance tier (major = pin, normal, minor = silent). A source whose chat-id var is unset is simply off.
 
 ## Commands
 
