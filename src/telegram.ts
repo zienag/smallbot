@@ -40,11 +40,15 @@ export function buildPost(post: Post): string {
   return withNotes.length <= MAX_WITH_NOTES ? withNotes : head;
 }
 
+export interface InlineKeyboard {
+  inline_keyboard: { text: string; callback_data?: string; url?: string }[][];
+}
+
 export async function sendMessage(
   botToken: string,
-  chatId: string,
+  chatId: string | number,
   text: string,
-  opts: { silent?: boolean } = {},
+  opts: { silent?: boolean; keyboard?: InlineKeyboard } = {},
 ): Promise<number> {
   const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: "POST",
@@ -55,6 +59,7 @@ export async function sendMessage(
       parse_mode: "HTML",
       link_preview_options: { is_disabled: true },
       disable_notification: opts.silent ?? false,
+      ...(opts.keyboard ? { reply_markup: opts.keyboard } : {}),
     }),
   });
   if (!res.ok) {
@@ -62,6 +67,46 @@ export async function sendMessage(
   }
   const data = (await res.json()) as { result?: { message_id?: number } };
   return data.result?.message_id ?? 0;
+}
+
+/** Edits are always silent — that is the whole point of the card design. */
+export async function editMessageText(
+  botToken: string,
+  chatId: string | number,
+  messageId: number,
+  text: string,
+  opts: { keyboard?: InlineKeyboard } = {},
+): Promise<void> {
+  const res = await fetch(`https://api.telegram.org/bot${botToken}/editMessageText`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      message_id: messageId,
+      text,
+      parse_mode: "HTML",
+      link_preview_options: { is_disabled: true },
+      ...(opts.keyboard ? { reply_markup: opts.keyboard } : {}),
+    }),
+  });
+  if (!res.ok) {
+    throw new Error(`telegram editMessageText failed: ${res.status} ${await res.text()}`);
+  }
+}
+
+export async function answerCallbackQuery(
+  botToken: string,
+  callbackQueryId: string,
+  opts: { text?: string; url?: string } = {},
+): Promise<void> {
+  const res = await fetch(`https://api.telegram.org/bot${botToken}/answerCallbackQuery`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ callback_query_id: callbackQueryId, ...opts }),
+  });
+  if (!res.ok) {
+    throw new Error(`telegram answerCallbackQuery failed: ${res.status} ${await res.text()}`);
+  }
 }
 
 /** Needs the bot to be a channel admin with the pin right. */
@@ -77,6 +122,21 @@ export async function pinMessage(
   });
   if (!res.ok) {
     throw new Error(`telegram pinChatMessage failed: ${res.status} ${await res.text()}`);
+  }
+}
+
+export async function unpinMessage(
+  botToken: string,
+  chatId: string,
+  messageId: number,
+): Promise<void> {
+  const res = await fetch(`https://api.telegram.org/bot${botToken}/unpinChatMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ chat_id: chatId, message_id: messageId }),
+  });
+  if (!res.ok) {
+    throw new Error(`telegram unpinChatMessage failed: ${res.status} ${await res.text()}`);
   }
 }
 

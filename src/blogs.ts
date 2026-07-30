@@ -88,15 +88,8 @@ export interface BlogDigest {
   bullets: string[];
 }
 
-const DIGEST_PROMPT = (source: string, title: string, text: string) => `\
-You are writing a short digest of a post from ${source} for a Telegram channel \
-whose readers are engineers who follow AI news daily.
-
-Post title: ${title}
-
-Post text (extracted from the page, may contain navigation noise):
-${text}
-
+// Split so the two prompts differ only in where the article comes from.
+const DIGEST_TASK = `\
 Pick the 2-4 points an engineer would actually care about: concrete \
 capabilities, numbers, and takeaways, not marketing framing. Each bullet is \
 one short sentence. Wrap commands, flags, and other identifiers in backticks. \
@@ -104,6 +97,27 @@ Write in English.
 
 Also assign the post an importance tier:
 ${TIER_CRITERIA}`;
+
+const DIGEST_HEAD = (source: string, title: string) => `\
+You are writing a short digest of a post from ${source} for a Telegram channel \
+whose readers are engineers who follow AI news daily.
+
+Post title: ${title}`;
+
+const DIGEST_PROMPT = (source: string, title: string, text: string) => `\
+${DIGEST_HEAD(source, title)}
+
+Post text (extracted from the page, may contain navigation noise):
+${text}
+
+${DIGEST_TASK}`;
+
+const DIGEST_URL_PROMPT = (source: string, title: string, url: string) => `\
+${DIGEST_HEAD(source, title)}
+
+Fetch ${url} and digest the article on that page.
+
+${DIGEST_TASK}`;
 
 const DIGEST_SCHEMA = {
   type: "object",
@@ -115,6 +129,46 @@ const DIGEST_SCHEMA = {
   additionalProperties: false,
 };
 
+/**
+ * Same digest, but the model fetches the page itself. For openai.com, whose bot
+ * protection blocks our own fetch for hours at a time (see src/openai_news.ts);
+ * costs ~7.6¢ against ~2¢, so it is the fallback, not the path.
+ */
+export async function digestArticleByUrl(
+  apiKey: string,
+  kv: KVNamespace,
+  source: string,
+  title: string,
+  url: string,
+): Promise<{ tier: Tier; bullets: string[] }> {
+  const digest = await structuredFromPrompt<{ tier: Tier; bullets: string[] }>(
+    apiKey,
+    kv,
+    DIGEST_URL_PROMPT(source, title, url),
+    DIGEST_SCHEMA,
+    "opus",
+    true,
+  );
+  return { tier: digest.tier, bullets: digest.bullets.slice(0, 4) };
+}
+
+/** Shared with the OpenAI blog watch, which gets its article text elsewhere. */
+export async function digestArticle(
+  apiKey: string,
+  kv: KVNamespace,
+  source: string,
+  title: string,
+  text: string,
+): Promise<{ tier: Tier; bullets: string[] }> {
+  const digest = await structuredFromPrompt<{ tier: Tier; bullets: string[] }>(
+    apiKey,
+    kv,
+    DIGEST_PROMPT(source, title, text.slice(0, ARTICLE_TEXT_LIMIT)),
+    DIGEST_SCHEMA,
+  );
+  return { tier: digest.tier, bullets: digest.bullets.slice(0, 4) };
+}
+
 export async function digestBlogPost(
   apiKey: string,
   kv: KVNamespace,
@@ -124,14 +178,14 @@ export async function digestBlogPost(
   if (!res.ok) throw new Error(`blog post fetch failed: ${res.status} ${entry.url}`);
   const page = await res.text();
   const title = pageTitle(page) ?? entry.url;
-  const text = (articleText(page) ?? title).slice(0, ARTICLE_TEXT_LIMIT);
-  const digest = await structuredFromPrompt<{ tier: Tier; bullets: string[] }>(
+  const digest = await digestArticle(
     apiKey,
     kv,
-    DIGEST_PROMPT(entry.source, title, text),
-    DIGEST_SCHEMA,
+    entry.source,
+    title,
+    articleText(page) ?? title,
   );
-  return { title, tier: digest.tier, bullets: digest.bullets.slice(0, 4) };
+  return { title, ...digest };
 }
 
 export function formatBlogPost(entry: BlogEntry, digest: BlogDigest): string {

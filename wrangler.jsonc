@@ -3,8 +3,13 @@
   "name": "smallbot",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-01",
+  // Real browser for openai.com article pages; quickAction needs no client
+  // library, only a compatibility date of 2026-03-24 or later.
+  "browser": { "binding": "BROWSER" },
+  // The fast cron carries only the status watch (STATUS_CRON in src/index.ts —
+  // the two strings must match), everything else rides the slow one.
   "triggers": {
-    "crons": ["*/15 * * * *"]
+    "crons": ["*/15 * * * *", "*/5 * * * *"]
   },
   "kv_namespaces": [
     { "binding": "RELEASES", "id": "2254c70148884faa8d27f6fd73e08e81" }
@@ -15,6 +20,8 @@
     "TELEGRAM_MODELS_CHAT_ID": "@model_drops",
     "TELEGRAM_ANTHROPIC_BLOG_CHAT_ID": "@anthropic_blogs",
     "TELEGRAM_OPENAI_BLOG_CHAT_ID": "@openai_blogs",
+    "TELEGRAM_STATUS_CHAT_ID": "@anthropic_status",
+    "TELEGRAM_STATUS_BOT_USERNAME": "anthropic_status_watch_bot",
     "DRY_RUN": "0"
   }
 }

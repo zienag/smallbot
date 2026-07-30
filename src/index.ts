@@ -2,10 +2,13 @@ import {
   ANTHROPIC_BLOG_SEEN_KEY,
   type BlogEntry,
   type Tier,
+  digestArticle,
+  digestArticleByUrl,
   digestBlogPost,
   fetchAllBlogEntries,
   formatBlogPost,
 } from "./blogs";
+import { type BrowserRun, QUICK_ACTION_GAP_MS, fetchPageMarkdown } from "./browser";
 import { fetchChangelog } from "./changelog";
 import { fetchCodexReleases } from "./codex";
 import {
@@ -16,28 +19,64 @@ import {
 } from "./models";
 import {
   OPENAI_BLOG_SEEN_KEY,
-  OPENAI_SEEN_KEY,
+  type NewsItem,
   classifyTier,
   fetchOpenAiNews,
+  formatOpenAiBlogPost,
   formatOpenAiModelPost,
-  isModelRelease,
 } from "./openai_news";
+import {
+  OPENAI_KNOWN_MODELS_KEY,
+  type OpenAiArticle,
+  type OpenAiModel,
+  findAnnouncement,
+  formatNewOpenAiModelsPost,
+  listOpenAiModels,
+} from "./openai_models";
+import {
+  type DevPost,
+  OPENAI_DEV_SEEN_KEY,
+  fetchDevPostText,
+  fetchDevPosts,
+  formatDevPost,
+} from "./openai_dev";
 import { fetchNpmLatest } from "./npm";
+import {
+  type Incident,
+  STATUS_INCIDENTS_KEY,
+  type StatusState,
+  fetchIncidents,
+  formatIncidentCard,
+  formatUpdateDm,
+  isHighImpact,
+  pendingUpdates,
+  pruneState,
+  seedState,
+} from "./status";
+import { SUBS_PREFIX, handleTelegramUpdate, notifySubscribers } from "./status_bot";
 import { summarize } from "./summarize";
 import {
   CAPTION_LIMIT,
+  type InlineKeyboard,
   buildPost,
   changelogAnchorUrl,
+  editMessageText,
   pinMessage,
   sendAlbum,
   sendMessage,
+  unpinMessage,
 } from "./telegram";
 import { compareVersions } from "./version";
 
 export interface Env {
   RELEASES: KVNamespace;
+  // Real browser on the edge — how openai.com article pages get read at all
+  // (src/browser.ts). No client library, just the binding.
+  BROWSER: BrowserRun;
   TELEGRAM_BOT_TOKEN: string;
   ANTHROPIC_API_KEY: string;
+  // Read-only use: the model list is what tells us OpenAI shipped something.
+  OPENAI_API_KEY?: string;
   TRIGGER_SECRET: string;
   TELEGRAM_CHAT_ID: string;
   // A source with no channel configured is simply off.
@@ -45,6 +84,13 @@ export interface Env {
   TELEGRAM_MODELS_CHAT_ID?: string;
   TELEGRAM_ANTHROPIC_BLOG_CHAT_ID?: string;
   TELEGRAM_OPENAI_BLOG_CHAT_ID?: string;
+  TELEGRAM_STATUS_CHAT_ID?: string;
+  // The status channel runs on its own bot (@anthropic_status_watch_bot): it
+  // owns the cards, so Follow-button callbacks and subscriber DMs land on its
+  // webhook, not on Bipozavr.
+  TELEGRAM_STATUS_BOT_TOKEN?: string;
+  TELEGRAM_STATUS_BOT_USERNAME?: string;
+  STATUS_WEBHOOK_SECRET?: string;
   DRY_RUN?: string;
 }
 
@@ -193,38 +239,74 @@ async function postModelsMessage(
   await sendMessage(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_MODELS_CHAT_ID!, post);
 }
 
-const MAX_CLASSIFY_PER_TICK = 8;
-
-async function watchOpenAiNews(env: Env, dryRun: boolean): Promise<string> {
-  const items = await fetchOpenAiNews();
-  const seenRaw = await env.RELEASES.get(OPENAI_SEEN_KEY);
-  if (!seenRaw) {
-    if (dryRun) return `openai: would seed ${items.length} seen (dry)`;
-    await env.RELEASES.put(OPENAI_SEEN_KEY, JSON.stringify(items.map((i) => i.guid)));
-    return `openai: seeded ${items.length} seen, nothing posted`;
+/**
+ * The OpenAI half of the model channel, mirroring the Anthropic one: a new id in
+ * /v1/models is the trigger, and the news feed only enriches what the diff
+ * already established. The feed used to be the trigger, with an LLM deciding
+ * which item was a launch — it announced an engineering retrospective as a model
+ * release, and no wording fixes a mechanism that guesses at a fact.
+ */
+async function watchOpenAiModels(env: Env, dryRun: boolean): Promise<string> {
+  const models = await listOpenAiModels(env.OPENAI_API_KEY!);
+  const knownRaw = await env.RELEASES.get(OPENAI_KNOWN_MODELS_KEY);
+  if (!knownRaw) {
+    if (dryRun) return `openai_models: would seed ${models.length} known (dry)`;
+    await env.RELEASES.put(OPENAI_KNOWN_MODELS_KEY, JSON.stringify(models.map((m) => m.id)));
+    return `openai_models: seeded ${models.length} known, nothing posted`;
   }
-  const seen = new Set(JSON.parse(seenRaw) as string[]);
-  // Oldest first; the cap bounds LLM calls per tick, the tail catches up next tick.
-  const fresh = items
-    .filter((i) => !seen.has(i.guid))
-    .reverse()
-    .slice(0, MAX_CLASSIFY_PER_TICK);
-  if (fresh.length === 0) return "openai: nothing new";
+  const known = new Set(JSON.parse(knownRaw) as string[]);
+  const fresh = models.filter((m) => !known.has(m.id));
+  if (fresh.length === 0) return "openai_models: nothing new";
 
-  const posted: string[] = [];
-  for (const item of fresh) {
-    if (await isModelRelease(env.ANTHROPIC_API_KEY, env.RELEASES, item)) {
-      const post = formatOpenAiModelPost(item);
-      if (dryRun) console.log(`DRY_RUN: would post OpenAI item:\n${post}`);
-      else await sendMessage(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_MODELS_CHAT_ID!, post);
-      posted.push(item.title);
-    }
-    if (!dryRun) {
-      seen.add(item.guid);
-      await env.RELEASES.put(OPENAI_SEEN_KEY, JSON.stringify([...seen]));
-    }
+  const { post, via } = await buildOpenAiModelsPost(env, fresh);
+  const ids = fresh.map((m) => m.id).join(", ");
+  if (dryRun) {
+    console.log(`DRY_RUN: would post new OpenAI models:\n${post}`);
+    return `openai_models: would post ${ids} [${via}] (dry)`;
   }
-  return `openai: processed ${fresh.length}, posted ${posted.length ? posted.join(" | ") : "none"}${dryRun ? " (dry)" : ""}`;
+  await sendMessage(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_MODELS_CHAT_ID!, post);
+  // Union-merge: a model the API stops listing for a tick must not re-announce.
+  await env.RELEASES.put(
+    OPENAI_KNOWN_MODELS_KEY,
+    JSON.stringify([...known, ...fresh.map((m) => m.id)]),
+  );
+  return `openai_models: posted ${ids} [${via}]`;
+}
+
+// Each article costs a browser action or ~7.6¢, and OpenAI announces a whole
+// family in one post, so a tick's worth of ids rarely needs more than one.
+const MAX_ANNOUNCEMENTS_PER_POST = 2;
+
+async function buildOpenAiModelsPost(
+  env: Env,
+  fresh: OpenAiModel[],
+): Promise<{ post: string; via: string }> {
+  let items: NewsItem[] = [];
+  try {
+    items = await fetchOpenAiNews();
+  } catch (err) {
+    // Enrichment only; the ids are the announcement.
+    console.log(`openai_models: feed fetch failed, posting ids alone: ${err}`);
+  }
+  const found: NewsItem[] = [];
+  for (const model of fresh) {
+    const hit = findAnnouncement(model.id, items);
+    if (hit && !found.some((f) => f.link === hit.link)) found.push(hit);
+    if (found.length === MAX_ANNOUNCEMENTS_PER_POST) break;
+  }
+  const articles: OpenAiArticle[] = [];
+  const vias: string[] = [];
+  for (const [i, item] of found.entries()) {
+    // Browser Run's free plan allows one quick action per 10 seconds.
+    if (i > 0) await new Promise((r) => setTimeout(r, QUICK_ACTION_GAP_MS));
+    const { bullets, via } = await digestOpenAiArticle(env, item);
+    articles.push({ item, bullets });
+    vias.push(via);
+  }
+  return {
+    post: formatNewOpenAiModelsPost(fresh, articles),
+    via: vias.length === 0 ? "ids only" : vias.join(", "),
+  };
 }
 
 // The tier tunes delivery: minor posts silently, major additionally pins.
@@ -276,6 +358,53 @@ async function watchAnthropicBlogs(env: Env, dryRun: boolean): Promise<string> {
   return `blog: posted ${posted.join(", ")}${dryRun ? " (dry)" : ""}`;
 }
 
+/**
+ * Browser first (free), then the model's own fetch (paid), then nothing but the
+ * feed's own sentence. A post always goes out, only its depth degrades.
+ */
+async function digestOpenAiArticle(
+  env: Env,
+  item: NewsItem,
+): Promise<{ bullets: string[]; tier: Tier; via: string }> {
+  const markdown = await fetchPageMarkdown(env.BROWSER, item.link);
+  if (markdown) {
+    const digest = await digestArticle(
+      env.ANTHROPIC_API_KEY,
+      env.RELEASES,
+      "OpenAI",
+      item.title,
+      markdown,
+    );
+    return { ...digest, via: "browser" };
+  }
+  try {
+    const digest = await digestArticleByUrl(
+      env.ANTHROPIC_API_KEY,
+      env.RELEASES,
+      "OpenAI",
+      item.title,
+      item.link,
+    );
+    return { ...digest, via: "web_fetch" };
+  } catch (err) {
+    console.log(`openai web_fetch digest failed for ${item.link}: ${err}`);
+  }
+  const tier = await classifyTier(env.ANTHROPIC_API_KEY, env.RELEASES, item);
+  return { bullets: [], tier, via: "feed only" };
+}
+
+async function buildOpenAiBlogPost(
+  env: Env,
+  item: NewsItem,
+): Promise<{ post: string; tier: Tier; via: string }> {
+  const { bullets, tier, via } = await digestOpenAiArticle(env, item);
+  // No bullets falls back to the feed sentence inside the formatter.
+  return { post: formatOpenAiBlogPost(item, bullets), tier, via };
+}
+
+// Bounds the digests one tick can pay for; the tail catches up next tick.
+const MAX_OPENAI_BLOG_PER_TICK = 8;
+
 async function watchOpenAiBlog(env: Env, dryRun: boolean): Promise<string> {
   const items = await fetchOpenAiNews();
   const seenRaw = await env.RELEASES.get(OPENAI_BLOG_SEEN_KEY);
@@ -288,13 +417,14 @@ async function watchOpenAiBlog(env: Env, dryRun: boolean): Promise<string> {
   const fresh = items
     .filter((i) => !seen.has(i.guid))
     .reverse()
-    .slice(0, MAX_CLASSIFY_PER_TICK);
+    .slice(0, MAX_OPENAI_BLOG_PER_TICK);
   if (fresh.length === 0) return "openai_blog: nothing new";
 
   const posted: string[] = [];
-  for (const item of fresh) {
-    const tier = await classifyTier(env.ANTHROPIC_API_KEY, env.RELEASES, item);
-    const post = formatOpenAiModelPost(item);
+  for (const [i, item] of fresh.entries()) {
+    // Browser Run's free plan allows one quick action per 10 seconds.
+    if (i > 0) await new Promise((r) => setTimeout(r, QUICK_ACTION_GAP_MS));
+    const { post, tier, via } = await buildOpenAiBlogPost(env, item);
     if (dryRun) {
       console.log(`DRY_RUN: would post [${tier}] OpenAI blog item:\n${post}`);
     } else {
@@ -302,9 +432,178 @@ async function watchOpenAiBlog(env: Env, dryRun: boolean): Promise<string> {
       seen.add(item.guid);
       await env.RELEASES.put(OPENAI_BLOG_SEEN_KEY, JSON.stringify([...seen]));
     }
-    posted.push(`${item.title} [${tier}]`);
+    posted.push(`${item.title} [${tier}, ${via}]`);
   }
   return `openai_blog: posted ${posted.join(" | ")}${dryRun ? " (dry)" : ""}`;
+}
+
+// The developer half of openai.com, into the same channel as the news feed.
+async function watchOpenAiDevBlog(env: Env, dryRun: boolean): Promise<string> {
+  const posts = await fetchDevPosts();
+  const seenRaw = await env.RELEASES.get(OPENAI_DEV_SEEN_KEY);
+  if (!seenRaw) {
+    if (dryRun) return `openai_dev: would seed ${posts.length} seen (dry)`;
+    await env.RELEASES.put(OPENAI_DEV_SEEN_KEY, JSON.stringify(posts.map((p) => p.url)));
+    return `openai_dev: seeded ${posts.length} seen, nothing posted`;
+  }
+  const seen = new Set(JSON.parse(seenRaw) as string[]);
+  const fresh = posts.filter((p) => !seen.has(p.url)).slice(0, MAX_BLOG_POSTS_PER_TICK);
+  if (fresh.length === 0) return "openai_dev: nothing new";
+
+  const posted: string[] = [];
+  for (const post of fresh) {
+    const { text, tier, body } = await buildDevPost(env, post);
+    if (!text) {
+      console.log(`openai_dev: no text for ${post.url}, skipping until next tick`);
+      continue;
+    }
+    if (dryRun) {
+      console.log(`DRY_RUN: would post [${tier}] ${post.url}:\n${body}`);
+    } else {
+      await sendTiered(env, env.TELEGRAM_OPENAI_BLOG_CHAT_ID!, body, tier);
+      seen.add(post.url);
+      await env.RELEASES.put(OPENAI_DEV_SEEN_KEY, JSON.stringify([...seen]));
+    }
+    posted.push(`${post.title} [${tier}]`);
+  }
+  return `openai_dev: posted ${posted.length ? posted.join(" | ") : "none"}${dryRun ? " (dry)" : ""}`;
+}
+
+async function buildDevPost(
+  env: Env,
+  post: DevPost,
+): Promise<{ text: boolean; tier: Tier; body: string }> {
+  const text = await fetchDevPostText(post);
+  if (!text) return { text: false, tier: "minor", body: "" };
+  const digest = await digestArticle(
+    env.ANTHROPIC_API_KEY,
+    env.RELEASES,
+    "the OpenAI developer blog",
+    post.title,
+    text,
+  );
+  return { text: true, tier: digest.tier, body: formatDevPost(post, digest.bullets) };
+}
+
+const MAX_STATUS_CARDS_PER_TICK = 5;
+
+function followKeyboard(incident: Incident): InlineKeyboard | undefined {
+  // Nothing left to follow once it's over.
+  if (incident.resolved) return undefined;
+  return { inline_keyboard: [[{ text: "🔔 Follow", callback_data: `sub:${incident.id}` }]] };
+}
+
+/**
+ * One card per incident, edited in place as the timeline grows — the channel
+ * is a board of incidents, not a stream of "we are continuing to work on a
+ * fix". The only sound the channel ever makes is a high-impact incident
+ * opening; everything after that is a silent edit, and whoever pressed Follow
+ * gets each update loudly in DM instead.
+ */
+async function upsertIncidentCard(
+  env: Env,
+  incident: Incident,
+  messageId: number,
+): Promise<number> {
+  const chatId = env.TELEGRAM_STATUS_CHAT_ID!;
+  const token = env.TELEGRAM_STATUS_BOT_TOKEN!;
+  const card = formatIncidentCard(incident);
+  const keyboard = followKeyboard(incident);
+
+  if (messageId === 0) {
+    const loud = isHighImpact(incident) && !incident.resolved;
+    const newId = await sendMessage(token, chatId, card, { silent: !loud, keyboard });
+    if (loud) {
+      // The pin is nice-to-have; the card is already out.
+      try {
+        await pinMessage(token, chatId, newId);
+      } catch (err) {
+        console.log(`pin failed in ${chatId}: ${err}`);
+      }
+    }
+    return newId;
+  }
+
+  await editMessageText(token, chatId, messageId, card, { keyboard });
+  if (incident.resolved) {
+    // Unconditional: impact can be raised mid-incident, and a pin left hanging
+    // over a resolved incident is worse than a wasted call.
+    try {
+      await unpinMessage(token, chatId, messageId);
+    } catch (err) {
+      console.log(`unpin failed in ${chatId}: ${err}`);
+    }
+  }
+  return messageId;
+}
+
+async function watchAnthropicStatus(env: Env, dryRun: boolean): Promise<string> {
+  const incidents = await fetchIncidents();
+  const raw = await env.RELEASES.get(STATUS_INCIDENTS_KEY);
+  if (!raw) {
+    if (dryRun) return `status: would seed ${incidents.length} incidents (dry)`;
+    await env.RELEASES.put(STATUS_INCIDENTS_KEY, JSON.stringify(seedState(incidents)));
+    return `status: seeded ${incidents.length} incidents, nothing posted`;
+  }
+  const stored = JSON.parse(raw) as StatusState;
+  const state = pruneState(stored, incidents);
+  const dropped = Object.keys(stored).length - Object.keys(state).length;
+
+  // Oldest incident first, so a tick catching up replays history in order.
+  const changed = [...incidents]
+    .reverse()
+    .map((incident) => ({ incident, fresh: pendingUpdates(state, incident) }))
+    .filter(({ fresh }) => fresh.length > 0);
+  if (changed.length === 0) {
+    if (!dryRun && dropped > 0) await env.RELEASES.put(STATUS_INCIDENTS_KEY, JSON.stringify(state));
+    return `status: nothing new${dropped ? `, pruned ${dropped}` : ""}`;
+  }
+
+  const posted: string[] = [];
+  for (const { incident, fresh } of changed.slice(0, MAX_STATUS_CARDS_PER_TICK)) {
+    const entry = state[incident.id] ?? { messageId: 0, postedUpdates: [] };
+    if (dryRun) {
+      console.log(`DRY_RUN: would upsert card for ${incident.name}:\n${formatIncidentCard(incident)}`);
+    } else {
+      entry.messageId = await upsertIncidentCard(env, incident, entry.messageId);
+      // The card always renders the whole incident, so every update it shows
+      // is posted — not just the ones DMed below.
+      entry.postedUpdates = incident.updates.map((u) => u.id);
+      state[incident.id] = entry;
+      await env.RELEASES.put(STATUS_INCIDENTS_KEY, JSON.stringify(state));
+      for (const update of fresh) {
+        await notifySubscribers(env, incident.id, formatUpdateDm(incident, update));
+      }
+      if (incident.resolved) await env.RELEASES.delete(SUBS_PREFIX + incident.id);
+    }
+    posted.push(`${incident.name} [${incident.updates.at(-1)?.status}]`);
+  }
+  const capped = changed.length > MAX_STATUS_CARDS_PER_TICK ? ", capped" : "";
+  return `status: updated ${posted.join(" | ")}${capped}${dryRun ? " (dry)" : ""}`;
+}
+
+// Test hook /run?source=status&version=<name or id substring>: renders one
+// incident's card (dry: at every stage of its timeline), never touches KV.
+async function forceStatusIncident(env: Env, query: string, dryRun: boolean): Promise<string> {
+  const q = query.toLowerCase();
+  const incident = (await fetchIncidents()).find(
+    (i) => i.name.toLowerCase().includes(q) || i.id === query,
+  );
+  if (!incident) return `status: no incident matching ${query}`;
+  if (dryRun) {
+    const stages = incident.updates.map((_, n) =>
+      formatIncidentCard({ ...incident, resolved: false, updates: incident.updates.slice(0, n + 1) }),
+    );
+    stages.push(formatIncidentCard(incident));
+    const dms = incident.updates.map((u) => formatUpdateDm(incident, u));
+    return (
+      `status: ${incident.name} [${incident.impact}]\n=== card stages\n${stages.join("\n---\n")}` +
+      `\n=== subscriber DMs\n${dms.join("\n---\n")}`
+    );
+  }
+  if (!env.TELEGRAM_STATUS_CHAT_ID) return "status: no chat configured";
+  await upsertIncidentCard(env, incident, 0);
+  return `status: force-posted card for ${incident.name}`;
 }
 
 // Test hook /run?source=blog&version=<url substring>: digests and (outside
@@ -328,29 +627,42 @@ async function forceOpenAiBlogItem(env: Env, query: string, dryRun: boolean): Pr
     (i) => i.title.toLowerCase().includes(q) || i.guid.includes(query),
   );
   if (!item) return `openai_blog: no item matching ${query}`;
-  const tier = await classifyTier(env.ANTHROPIC_API_KEY, env.RELEASES, item);
-  const post = formatOpenAiModelPost(item);
-  if (dryRun) return `openai_blog: "${item.title}" tier=${tier} (dry)\n---\n${post}`;
+  const { post, tier, via } = await buildOpenAiBlogPost(env, item);
+  if (dryRun) return `openai_blog: "${item.title}" tier=${tier} via=${via} (dry)\n---\n${post}`;
   if (!env.TELEGRAM_OPENAI_BLOG_CHAT_ID) return "openai_blog: no chat configured";
   await sendTiered(env, env.TELEGRAM_OPENAI_BLOG_CHAT_ID, post, tier);
   return `openai_blog: force-posted "${item.title}" [${tier}]`;
 }
 
-// Test hook /run?source=openai&version=<title substring>: classifies and
-// (outside dry) posts one feed item, never touches KV.
-async function forceOpenAiItem(env: Env, query: string, dryRun: boolean): Promise<string> {
+// Test hook /run?source=openai_dev&version=<title substring>, never touches KV.
+async function forceDevPost(env: Env, query: string, dryRun: boolean): Promise<string> {
   const q = query.toLowerCase();
-  const item = (await fetchOpenAiNews()).find(
-    (i) => i.title.toLowerCase().includes(q) || i.guid.includes(query),
-  );
-  if (!item) return `openai: no item matching ${query}`;
-  const relevant = await isModelRelease(env.ANTHROPIC_API_KEY, env.RELEASES, item);
-  const post = formatOpenAiModelPost(item);
-  if (dryRun) return `openai: "${item.title}" → isModelRelease=${relevant} (dry)\n---\n${post}`;
-  if (!relevant) return `openai: "${item.title}" is not a model release, not posting`;
+  const post = (await fetchDevPosts()).find((p) => p.title.toLowerCase().includes(q));
+  if (!post) return `openai_dev: no post matching ${query}`;
+  const { text, tier, body } = await buildDevPost(env, post);
+  if (!text) return `openai_dev: could not read ${post.mdUrl}`;
+  if (dryRun) return `openai_dev: "${post.title}" tier=${tier} (dry)\n---\n${body}`;
+  if (!env.TELEGRAM_OPENAI_BLOG_CHAT_ID) return "openai_dev: no chat configured";
+  await sendTiered(env, env.TELEGRAM_OPENAI_BLOG_CHAT_ID, body, tier);
+  return `openai_dev: force-posted "${post.title}" [${tier}]`;
+}
+
+// Force-announce one OpenAI model (test hook /run?source=openai&version=<id>),
+// never touches KV. Shows which article the id matched, if any.
+async function forceOpenAiModel(env: Env, id: string, dryRun: boolean): Promise<string> {
+  if (!env.OPENAI_API_KEY) return "openai_models: no api key configured";
+  const model = (await listOpenAiModels(env.OPENAI_API_KEY)).find((m) => m.id === id) ?? {
+    id,
+    created: 0,
+  };
+  const { post, via } = await buildOpenAiModelsPost(env, [model]);
+  if (dryRun) {
+    console.log(`DRY_RUN: would post OpenAI model announcement:\n${post}`);
+    return `openai_models: would post ${id} [${via}] (dry)\n---\n${post}`;
+  }
   if (!env.TELEGRAM_MODELS_CHAT_ID) return "models: no chat configured";
   await sendMessage(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_MODELS_CHAT_ID, post);
-  return `openai: force-posted "${item.title}"`;
+  return `openai_models: force-posted ${id} [${via}]`;
 }
 
 // Force-announce one model (test hook /run?source=models&version=<id>), never touches KV.
@@ -381,9 +693,11 @@ export async function runPipeline(
 
   if (opts.forceVersion) {
     if (opts.source === "models") return forceModelAnnouncement(env, opts.forceVersion, dryRun);
-    if (opts.source === "openai") return forceOpenAiItem(env, opts.forceVersion, dryRun);
+    if (opts.source === "openai") return forceOpenAiModel(env, opts.forceVersion, dryRun);
     if (opts.source === "blog") return forceBlogEntry(env, opts.forceVersion, dryRun);
     if (opts.source === "openai_blog") return forceOpenAiBlogItem(env, opts.forceVersion, dryRun);
+    if (opts.source === "openai_dev") return forceDevPost(env, opts.forceVersion, dryRun);
+    if (opts.source === "status") return forceStatusIncident(env, opts.forceVersion, dryRun);
     const source = sources.find((s) => s.key === (opts.source ?? "claude"));
     if (!source) return `unknown source ${opts.source}`;
     if (!source.chatId && !dryRun) return `${source.key}: no chat configured`;
@@ -410,10 +724,12 @@ export async function runPipeline(
     } catch (err) {
       statuses.push(`models: failed: ${err}`);
     }
-    try {
-      statuses.push(await watchOpenAiNews(env, dryRun));
-    } catch (err) {
-      statuses.push(`openai: failed: ${err}`);
+    if (env.OPENAI_API_KEY) {
+      try {
+        statuses.push(await watchOpenAiModels(env, dryRun));
+      } catch (err) {
+        statuses.push(`openai_models: failed: ${err}`);
+      }
     }
   }
   if (env.TELEGRAM_ANTHROPIC_BLOG_CHAT_ID) {
@@ -429,30 +745,77 @@ export async function runPipeline(
     } catch (err) {
       statuses.push(`openai_blog: failed: ${err}`);
     }
+    try {
+      statuses.push(await watchOpenAiDevBlog(env, dryRun));
+    } catch (err) {
+      statuses.push(`openai_dev: failed: ${err}`);
+    }
   }
   return statuses.join("\n");
 }
 
+/**
+ * The status watch runs on its own schedule, so it is deliberately outside
+ * runPipeline: were both ticks to carry it, the two invocations that land on
+ * the same minute would race on one KV key and double-post an update.
+ */
+export async function runStatusTick(
+  env: Env,
+  opts: { dryOverride?: boolean } = {},
+): Promise<string> {
+  if (!env.TELEGRAM_STATUS_CHAT_ID) return "status: no chat configured";
+  if (!env.TELEGRAM_STATUS_BOT_TOKEN) return "status: no bot token configured";
+  const dryRun = opts.dryOverride ?? env.DRY_RUN === "1";
+  try {
+    return await watchAnthropicStatus(env, dryRun);
+  } catch (err) {
+    return `status: failed: ${err}`;
+  }
+}
+
+// Incidents get the faster of the two crons in wrangler.jsonc: their median
+// life is under an hour and a quarter of them are shorter than 25 minutes, so
+// a 15-minute loop would routinely collapse one into a single message that
+// opens and resolves at once.
+const STATUS_CRON = "*/5 * * * *";
+
 export default {
-  async scheduled(_event, env, _ctx) {
-    console.log(await runPipeline(env));
+  async scheduled(event, env, _ctx) {
+    console.log(event.cron === STATUS_CRON ? await runStatusTick(env) : await runPipeline(env));
   },
 
   async fetch(request, env) {
     const url = new URL(request.url);
+    // The status bot's webhook. Telegram authenticates with the secret header
+    // it was registered with (setWebhook secret_token).
+    if (url.pathname === "/telegram") {
+      if (
+        !env.STATUS_WEBHOOK_SECRET ||
+        request.headers.get("x-telegram-bot-api-secret-token") !== env.STATUS_WEBHOOK_SECRET
+      ) {
+        return new Response("forbidden", { status: 403 });
+      }
+      await handleTelegramUpdate(env, await request.json());
+      return new Response("ok");
+    }
     if (url.pathname !== "/run") return new Response("not found", { status: 404 });
     if (request.method !== "POST") return new Response("method not allowed", { status: 405 });
     // Bearer header, not a query param: query strings end up in logs and copied URLs.
     if (request.headers.get("authorization") !== `Bearer ${env.TRIGGER_SECRET}`) {
       return new Response("forbidden", { status: 403 });
     }
-    const result = await runPipeline(env, {
-      forceVersion: url.searchParams.get("version") ?? undefined,
-      source: url.searchParams.get("source") ?? undefined,
-      dryOverride: url.searchParams.has("dry")
-        ? url.searchParams.get("dry") === "1"
-        : undefined,
-    });
+    const dryOverride = url.searchParams.has("dry")
+      ? url.searchParams.get("dry") === "1"
+      : undefined;
+    const only = url.searchParams.get("only");
+    if (only && only !== "status") return new Response(`unknown only=${only}\n`, { status: 400 });
+    const result = only
+      ? await runStatusTick(env, { dryOverride })
+      : await runPipeline(env, {
+          forceVersion: url.searchParams.get("version") ?? undefined,
+          source: url.searchParams.get("source") ?? undefined,
+          dryOverride,
+        });
     return new Response(result + "\n");
   },
 } satisfies ExportedHandler<Env>;

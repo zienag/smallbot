@@ -124,39 +124,64 @@ export async function structuredFromPrompt<T>(
   prompt: string | Anthropic.ContentBlockParam[],
   schema: Record<string, unknown>,
   family = "opus",
+  webFetch = false,
 ): Promise<T> {
   const client = new Anthropic({ apiKey });
   const model = await resolveModel(client, kv, family);
   try {
-    return await complete<T>(client, model, prompt, schema);
+    return await complete<T>(client, model, prompt, schema, webFetch);
   } catch (err) {
     // A new version can break the call surface (like 4.6→4.7 removed
     // sampling params) — on 400, fall back to the known-good one.
     if (err instanceof Anthropic.BadRequestError && model !== FALLBACK_MODEL) {
       console.log(`${model} rejected the request (${err.message}), falling back to ${FALLBACK_MODEL}`);
       await kv.put(MODEL_CACHE_KEY, FALLBACK_MODEL, { expirationTtl: MODEL_CACHE_TTL_S });
-      return await complete<T>(client, FALLBACK_MODEL, prompt, schema);
+      return await complete<T>(client, FALLBACK_MODEL, prompt, schema, webFetch);
     }
     throw err;
   }
 }
+
+// The dated variant is the cheap one: web_fetch_20260209 runs code execution to
+// filter the page and cost 21¢ against 7.6¢ for the same article.
+const WEB_FETCH_BETA = "web-fetch-2025-09-10";
+const WEB_FETCH_TOOL = {
+  type: "web_fetch_20250910",
+  name: "web_fetch",
+  max_uses: 2,
+  max_content_tokens: 8000,
+};
 
 async function complete<T>(
   client: Anthropic,
   model: string,
   prompt: string | Anthropic.ContentBlockParam[],
   schema: Record<string, unknown>,
+  webFetch: boolean,
 ): Promise<T> {
-  const response = await client.messages.create({
+  const params = {
     model,
     max_tokens: 2048,
-    thinking: { type: "adaptive" },
+    thinking: { type: "adaptive" as const },
     output_config: {
-      effort: "medium",
-      format: { type: "json_schema", schema },
+      effort: "medium" as const,
+      format: { type: "json_schema" as const, schema },
     },
-    messages: [{ role: "user", content: prompt }],
-  });
+    messages: [{ role: "user" as const, content: prompt }],
+  };
+  const response = webFetch
+    ? await client.beta.messages.create({
+        ...params,
+        betas: [WEB_FETCH_BETA],
+        tools: [WEB_FETCH_TOOL as unknown as Anthropic.Beta.BetaToolUnion],
+      })
+    : await client.messages.create(params);
+  // Without this the model happily digests a page it never read: on a fetch
+  // error it still owes us the schema, and the title alone is enough to invent
+  // bullets from.
+  if (webFetch && !response.content.some((b) => b.type === "web_fetch_tool_result")) {
+    throw new Error("web_fetch returned no page");
+  }
   const text = response.content.find((b) => b.type === "text");
   if (!text) throw new Error("no text block in model response");
   return JSON.parse(text.text) as T;
