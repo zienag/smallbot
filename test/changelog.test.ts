@@ -249,6 +249,8 @@ describe("parseRss", () => {
       description:
         "Sarah Friar, CFO of OpenAI, introduces a practical AI scorecard to measure ROI through useful work, cost per successful task, dependability, and return on compute.",
       guid: "https://openai.com/index/a-scorecard-for-the-ai-age",
+      published: Date.parse("Fri, 17 Jul 2026 10:00:00 GMT"),
+      category: "Company",
     });
   });
 });
@@ -260,6 +262,8 @@ describe("formatOpenAiModelPost", () => {
       link: "https://openai.com/index/introducing-gpt-6",
       description: "Bigger & better.",
       guid: "g",
+      published: Date.parse("Fri, 31 Jul 2026 15:00:00 GMT"),
+      category: "Product",
     });
     expect(post).toBe(
       '<b>OpenAI: <a href="https://openai.com/index/introducing-gpt-6">Introducing GPT-6 &lt;beta&gt;</a></b>\n\nBigger &amp; better.',

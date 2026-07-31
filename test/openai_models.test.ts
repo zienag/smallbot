@@ -109,7 +109,14 @@ describe("isDatedSnapshot", () => {
 
 function item(title: string) {
   const link = `https://openai.com/index/${title.toLowerCase().replace(/[^a-z0-9.]+/g, "-")}`;
-  return { title, link, description: "One sentence from the feed.", guid: link };
+  return {
+    title,
+    link,
+    description: "One sentence from the feed.",
+    guid: link,
+    published: Date.parse("Fri, 31 Jul 2026 15:00:00 GMT"),
+    category: "Product",
+  };
 }
 
 // Real titles from openai.com/news/rss.xml, newest first as the feed serves them.

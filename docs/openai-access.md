@@ -4,6 +4,67 @@ Why the OpenAI blog watch reads article pages through a browser instead of
 fetching them, and what was measured to settle that. CLAUDE.md points here from
 the OpenAI blog watch bullet.
 
+## Which list is the news list
+
+`news/rss.xml` is not the newsroom. It carries **every** page the site has ever
+published — 1104 entries against the newsroom's 542 — and it is not append-only:
+on 2026-07-31 OpenAI backfilled the case pages of its old "Disrupting malicious
+uses of AI" reports, dated 2024 and 2025, and the channel posted nineteen of
+them in half an hour. Two kinds of page live in the feed but not in the
+newsroom: those case pages (44 of them) and the customer stories (102, "How X
+uses Codex"). Neither carries a `<category>`, which is the feed's own tell.
+
+The newsroom's list comes from the endpoint its "Load more" button calls:
+
+```
+openai.com/backend/articles/?locale=en-US
+  &pageQueries=[{"pageTypes":["Article"],"categories":[…]}]
+  &limit=30&skip=0&sort=new
+```
+
+JSON, Contentful-backed: `slug` (`index/<slug>`, what the feed link ends with),
+`title`, `publicationDate`, `categories`, `seoFields.metaDescription`. `search=`
+queries the whole set — `search=disrupting` returns 5 items, all the umbrella
+reports, no case page among them.
+
+Two parameters matter. **`locale`** decides the language of the titles and
+follows the caller's IP when unset, so it is pinned to `en-US` — from Moscow the
+page itself redirects to `/ru-RU/` and answers in Russian. **`categories`** is
+the page's own list, copied verbatim; note `global-affairs-news-listed` rather
+than plain `global-affairs`, which is how the site keeps some policy posts out
+of the newsroom while the feed shows them all as "Global Affairs".
+
+The endpoint is behind the same challenge as everything else here (no UA → 403
+`cf-mitigated: challenge`, a real Chrome UA → 200) and it flaps from the worker
+the way the article pages do: two force-runs minutes apart answered
+`list=unreachable`, the next one `via=fetch`. So it cannot be the trigger. The
+feed stays the trigger and the list is asked only when a tick has something to
+post — once or twice a day, far short of what armed the block below.
+
+Three rungs, reported as `via=` by the dry hook and the tick status, the same
+shape as the digest's own ladder:
+
+1. **plain fetch** with a real Chrome UA — free, and answers more often than the
+   article pages do.
+2. **the browser** — `quickAction("markdown")` on the same URL. It solves the
+   challenge, and the JSON comes back fenced inside the markdown, so the parser
+   digs out the first `{` … last `}`. One quick action, once or twice a day.
+   **It spends the tick's quick-action slot**, so whoever runs next waits out
+   `QUICK_ACTION_GAP_MS` — measured: back to back, the second call answers
+   `429 {"code":2001,"message":"Rate limit exceeded"}`, and in a tick that
+   would be the first article's digest silently dropping to the 7.6¢ rung.
+   Both the post loop and the dry hook pace themselves off `via === "browser"`,
+   and pay nothing when the plain fetch answered.
+3. **the feed's own `<category>`** — present ⇒ listed. Free and never blocked.
+   It agrees with the list on every edge checked, including the posts in neither
+   ("Launching Sora responsibly", "Spring Update", "Stargate Infrastructure");
+   the two part only on the non-listed Global Affairs posts, which this rung
+   lets through.
+
+An unreachable list decides nothing permanently: unlisted items are not written
+to the seen-set, so the next tick reconsiders them, and the age gate absorbs
+them a fortnight later.
+
 ## What is in the way
 
 Article pages (`openai.com/index/<slug>`) sit behind a Cloudflare **JS

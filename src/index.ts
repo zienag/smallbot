@@ -20,10 +20,14 @@ import {
 import {
   OPENAI_BLOG_SEEN_KEY,
   type NewsItem,
+  articleSlug,
   classifyTier,
+  fetchNewsListSlugs,
   fetchOpenAiNews,
   formatOpenAiBlogPost,
   formatOpenAiModelPost,
+  isListed,
+  isRecent,
 } from "./openai_news";
 import {
   OPENAI_KNOWN_MODELS_KEY,
@@ -414,16 +418,42 @@ async function watchOpenAiBlog(env: Env, dryRun: boolean): Promise<string> {
     return `openai_blog: seeded ${items.length} seen, nothing posted`;
   }
   const seen = new Set(JSON.parse(seenRaw) as string[]);
-  const fresh = items
-    .filter((i) => !seen.has(i.guid))
-    .reverse()
-    .slice(0, MAX_OPENAI_BLOG_PER_TICK);
-  if (fresh.length === 0) return "openai_blog: nothing new";
+  const unseen = items.filter((i) => !seen.has(i.guid));
+  // Backfilled history is absorbed into the seen-set without a post, so it is
+  // reported once rather than reconsidered every tick.
+  const now = Date.now();
+  const stale = unseen.filter((i) => !isRecent(i, now));
+  if (stale.length > 0 && !dryRun) {
+    for (const item of stale) seen.add(item.guid);
+    await env.RELEASES.put(OPENAI_BLOG_SEEN_KEY, JSON.stringify([...seen]));
+  }
+  const recent = unseen.filter((i) => isRecent(i, now));
+  let skipped = stale.length > 0 ? `, skipped ${stale.length} backfilled` : "";
+  if (recent.length === 0) {
+    // A dry run is this source's health check, so it reports whether the news
+    // list still answers even when there is nothing to post.
+    if (!dryRun) return `openai_blog: nothing new${skipped}`;
+    const { via } = await fetchNewsListSlugs(env.BROWSER);
+    return `openai_blog: nothing new${skipped} (list via=${via})`;
+  }
+
+  // Only now, with something worth posting, is the list worth a request:
+  // rarely enough that asking cannot arm the challenge on its own. Items it
+  // does not list are left out of the seen-set, so a blocked list decides
+  // nothing permanently — the age gate absorbs them a fortnight later.
+  const { slugs: listed, via: listVia } = await fetchNewsListSlugs(env.BROWSER);
+  const postable = recent.filter((i) => isListed(i, listed));
+  const fresh = [...postable].reverse().slice(0, MAX_OPENAI_BLOG_PER_TICK);
+  const unlisted = recent.length - postable.length;
+  if (unlisted > 0) skipped += `, ${unlisted} not in the news list (via=${listVia})`;
+  if (fresh.length === 0) return `openai_blog: nothing new${skipped}`;
 
   const posted: string[] = [];
   for (const [i, item] of fresh.entries()) {
-    // Browser Run's free plan allows one quick action per 10 seconds.
-    if (i > 0) await new Promise((r) => setTimeout(r, QUICK_ACTION_GAP_MS));
+    // Browser Run's free plan allows one quick action per 10 seconds, and
+    // reading the list may have just spent one — otherwise the first digest of
+    // the tick answers 429 and drops to the rung that costs money.
+    if (i > 0 || listVia.startsWith("browser")) await new Promise((r) => setTimeout(r, QUICK_ACTION_GAP_MS));
     const { post, tier, via } = await buildOpenAiBlogPost(env, item);
     if (dryRun) {
       console.log(`DRY_RUN: would post [${tier}] OpenAI blog item:\n${post}`);
@@ -434,7 +464,7 @@ async function watchOpenAiBlog(env: Env, dryRun: boolean): Promise<string> {
     }
     posted.push(`${item.title} [${tier}, ${via}]`);
   }
-  return `openai_blog: posted ${posted.join(" | ")}${dryRun ? " (dry)" : ""}`;
+  return `openai_blog: posted ${posted.join(" | ")}${skipped}${dryRun ? " (dry)" : ""}`;
 }
 
 // The developer half of openai.com, into the same channel as the news feed.
@@ -627,8 +657,19 @@ async function forceOpenAiBlogItem(env: Env, query: string, dryRun: boolean): Pr
     (i) => i.title.toLowerCase().includes(q) || i.guid.includes(query),
   );
   if (!item) return `openai_blog: no item matching ${query}`;
-  const { post, tier, via } = await buildOpenAiBlogPost(env, item);
-  if (dryRun) return `openai_blog: "${item.title}" tier=${tier} via=${via} (dry)\n---\n${post}`;
+  if (dryRun) {
+    // A force-post deliberately ignores the filter; the dry run still reports
+    // what the filter would have said, which is the only view we have of
+    // whether the news list answers a worker at all. The list goes first, and
+    // the digest waits out the quick-action gap behind it, for the same reason
+    // the tick does it in that order.
+    const { slugs, via: listVia } = await fetchNewsListSlugs(env.BROWSER);
+    if (listVia.startsWith("browser")) await new Promise((r) => setTimeout(r, QUICK_ACTION_GAP_MS));
+    const verdict = slugs ? (slugs.has(articleSlug(item.link)) ? "yes" : "no") : "unreachable";
+    const { post, tier, via } = await buildOpenAiBlogPost(env, item);
+    return `openai_blog: "${item.title}" tier=${tier} via=${via} list=${verdict} (via=${listVia}) category=${item.category || "-"} (dry)\n---\n${post}`;
+  }
+  const { post, tier } = await buildOpenAiBlogPost(env, item);
   if (!env.TELEGRAM_OPENAI_BLOG_CHAT_ID) return "openai_blog: no chat configured";
   await sendTiered(env, env.TELEGRAM_OPENAI_BLOG_CHAT_ID, post, tier);
   return `openai_blog: force-posted "${item.title}" [${tier}]`;
