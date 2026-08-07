@@ -157,7 +157,7 @@ export async function sendAlbum(
   chatId: string,
   caption: string,
   photos: AlbumPhoto[],
-): Promise<void> {
+): Promise<number> {
   const form = new FormData();
   form.append("chat_id", chatId);
   photos.forEach((p, i) => {
@@ -189,4 +189,9 @@ export async function sendAlbum(
   if (!res.ok) {
     throw new Error(`telegram ${method} failed: ${res.status} ${await res.text()}`);
   }
+  const data = (await res.json()) as {
+    result?: { message_id?: number } | { message_id?: number }[];
+  };
+  const first = Array.isArray(data.result) ? data.result[0] : data.result;
+  return first?.message_id ?? 0;
 }

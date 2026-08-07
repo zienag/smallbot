@@ -21,6 +21,26 @@ curl -X POST "https://smallbot.zienag.workers.dev/run?version=2.1.209&dry=1" \
 
 Dry responses carry the post text for every source except `claude`/`codex`, where the body is just `force-posted <source> <version> (dry)` and the post itself goes to `console.log` (i.e. `wrangler tail`).
 
+## `/archive`
+
+Read-only feed of everything the bot did to the channels (issue #2), for an external mirror. GET-only, auth via `Authorization: Bearer <ARCHIVE_READ_SECRET>` (Keychain: `smallbot`/`archive-read-secret`) — a token that can read but never post or trigger.
+
+```sh
+curl "https://smallbot.zienag.workers.dev/archive?since=0" \
+  -H "Authorization: Bearer $(security find-generic-password -s smallbot -a archive-read-secret -w)"
+```
+
+Returns `{cursor, actions}`, up to 200 actions with `seq > since`, oldest first; poll again with `since=<cursor>`. Each action: `seq`, `ts` (epoch ms), `chat`, `kind` (`send|edit|pin|unpin`), `messageId`, and where present `text` (the exact HTML sent), `silent`, `tier`, `photos` (paths like `/archive/photo/<seq>/<idx>`, fetched with the same token — album bytes as posted). Message identity for replay is `(chat, messageId)`; an `edit` carries the full new text.
+
+Storage is the `smallbot-archive` D1 database (tables `actions`, `photos`, `migrations/`). Retention 30 days, pruned on write; `seq` never rewinds (AUTOINCREMENT — a consumer cursor survives an emptied table). Writes are best-effort *after* a successful Telegram call: a failed insert logs and moves on, so a gap in the archive is possible and reposting to the channel is not. Dry runs and subscriber DMs are not archived; force-posts are.
+
+Schema changes: add a numbered file under `migrations/`, then `npx wrangler d1 migrations apply smallbot-archive --local` for dev and `--remote` before the deploy. By-hand inspection:
+
+```sh
+npx wrangler d1 execute smallbot-archive --remote \
+  --command "SELECT seq, ts, chat, kind, message_id FROM actions ORDER BY seq DESC LIMIT 10"
+```
+
 ## Deploy traps
 
 **After `wrangler deploy` the old instance can keep serving `/run` for up to ~a minute** — a "fix didn't work" verdict right after deploying is unreliable (bit us twice), re-check before debugging.

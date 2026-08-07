@@ -37,6 +37,16 @@ describe("release feed", () => {
     expect(kv.store.get("last_posted_version")).toBe("1.0.1");
   });
 
+  it("keeps posting and advancing the cursor when the archive is broken", async () => {
+    const kv = fakeKv({ last_posted_version: "1.0.0" });
+    const env = feedEnv(kv);
+    (env as { ARCHIVE: unknown }).ARCHIVE = { prepare: () => { throw new Error("boom"); } };
+    const result = await runPipeline(env);
+
+    expect(result).toBe("claude: posted 1.0.1, 1.0.2");
+    expect(kv.store.get("last_posted_version")).toBe("1.0.2");
+  });
+
   it("on first run posts only the newest published version", async () => {
     const kv = fakeKv();
     const result = await runPipeline(feedEnv(kv));

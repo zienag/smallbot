@@ -57,6 +57,7 @@ import {
   pruneState,
   seedState,
 } from "./status";
+import { recordAction, readActions, readPhoto } from "./archive";
 import { SUBS_PREFIX, handleTelegramUpdate, notifySubscribers } from "./status_bot";
 import { summarize } from "./summarize";
 import {
@@ -74,6 +75,8 @@ import { compareVersions } from "./version";
 
 export interface Env {
   RELEASES: KVNamespace;
+  // Append-only archive of channel actions, read back via /archive (issue #2).
+  ARCHIVE: D1Database;
   // Real browser on the edge — how openai.com article pages get read at all
   // (src/browser.ts). No client library, just the binding.
   BROWSER: BrowserRun;
@@ -82,6 +85,8 @@ export interface Env {
   // Read-only use: the model list is what tells us OpenAI shipped something.
   OPENAI_API_KEY?: string;
   TRIGGER_SECRET: string;
+  // Grants archive reads only — deliberately not TRIGGER_SECRET, which can post.
+  ARCHIVE_READ_SECRET?: string;
   TELEGRAM_CHAT_ID: string;
   // A source with no channel configured is simply off.
   TELEGRAM_CODEX_CHAT_ID?: string;
@@ -165,7 +170,8 @@ async function postRelease(
     console.log(`DRY_RUN: would post ${source.product} ${release.version} (${post.length} chars):\n${post}`);
     return;
   }
-  await sendMessage(env.TELEGRAM_BOT_TOKEN, source.chatId!, post);
+  const messageId = await sendMessage(env.TELEGRAM_BOT_TOKEN, source.chatId!, post);
+  await recordAction(env.ARCHIVE, { chat: source.chatId!, kind: "send", messageId, text: post });
 }
 
 async function runFeed(env: Env, source: FeedSource, dryRun: boolean): Promise<string> {
@@ -231,16 +237,19 @@ async function postModelsMessage(
   post: string,
   announcements: { press?: { photos: { bytes: ArrayBuffer; mediaType: string }[] } }[],
 ): Promise<void> {
+  const chatId = env.TELEGRAM_MODELS_CHAT_ID!;
   const photos = announcements.flatMap((a) => a.press?.photos ?? []).slice(0, 10);
   if (photos.length > 0 && post.length <= CAPTION_LIMIT) {
     try {
-      await sendAlbum(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_MODELS_CHAT_ID!, post, photos);
+      const messageId = await sendAlbum(env.TELEGRAM_BOT_TOKEN, chatId, post, photos);
+      await recordAction(env.ARCHIVE, { chat: chatId, kind: "send", messageId, text: post, photos });
       return;
     } catch (err) {
       console.log(`album failed, falling back to plain text: ${err}`);
     }
   }
-  await sendMessage(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_MODELS_CHAT_ID!, post);
+  const messageId = await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, post);
+  await recordAction(env.ARCHIVE, { chat: chatId, kind: "send", messageId, text: post });
 }
 
 /**
@@ -268,7 +277,13 @@ async function watchOpenAiModels(env: Env, dryRun: boolean): Promise<string> {
     console.log(`DRY_RUN: would post new OpenAI models:\n${post}`);
     return `openai_models: would post ${ids} [${via}] (dry)`;
   }
-  await sendMessage(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_MODELS_CHAT_ID!, post);
+  const messageId = await sendMessage(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_MODELS_CHAT_ID!, post);
+  await recordAction(env.ARCHIVE, {
+    chat: env.TELEGRAM_MODELS_CHAT_ID!,
+    kind: "send",
+    messageId,
+    text: post,
+  });
   // Union-merge: a model the API stops listing for a tick must not re-announce.
   await env.RELEASES.put(
     OPENAI_KNOWN_MODELS_KEY,
@@ -315,13 +330,14 @@ async function buildOpenAiModelsPost(
 
 // The tier tunes delivery: minor posts silently, major additionally pins.
 async function sendTiered(env: Env, chatId: string, post: string, tier: Tier): Promise<void> {
-  const messageId = await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, post, {
-    silent: tier === "minor",
-  });
+  const silent = tier === "minor";
+  const messageId = await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, post, { silent });
+  await recordAction(env.ARCHIVE, { chat: chatId, kind: "send", messageId, text: post, silent, tier });
   if (tier === "major") {
     // The pin is nice-to-have; the post is already out.
     try {
       await pinMessage(env.TELEGRAM_BOT_TOKEN, chatId, messageId);
+      await recordAction(env.ARCHIVE, { chat: chatId, kind: "pin", messageId });
     } catch (err) {
       console.log(`pin failed in ${chatId}: ${err}`);
     }
@@ -543,10 +559,12 @@ async function upsertIncidentCard(
   if (messageId === 0) {
     const loud = isHighImpact(incident) && !incident.resolved;
     const newId = await sendMessage(token, chatId, card, { silent: !loud, keyboard });
+    await recordAction(env.ARCHIVE, { chat: chatId, kind: "send", messageId: newId, text: card, silent: !loud });
     if (loud) {
       // The pin is nice-to-have; the card is already out.
       try {
         await pinMessage(token, chatId, newId);
+        await recordAction(env.ARCHIVE, { chat: chatId, kind: "pin", messageId: newId });
       } catch (err) {
         console.log(`pin failed in ${chatId}: ${err}`);
       }
@@ -555,11 +573,13 @@ async function upsertIncidentCard(
   }
 
   await editMessageText(token, chatId, messageId, card, { keyboard });
+  await recordAction(env.ARCHIVE, { chat: chatId, kind: "edit", messageId, text: card });
   if (incident.resolved) {
     // Unconditional: impact can be raised mid-incident, and a pin left hanging
     // over a resolved incident is worse than a wasted call.
     try {
       await unpinMessage(token, chatId, messageId);
+      await recordAction(env.ARCHIVE, { chat: chatId, kind: "unpin", messageId });
     } catch (err) {
       console.log(`unpin failed in ${chatId}: ${err}`);
     }
@@ -702,7 +722,13 @@ async function forceOpenAiModel(env: Env, id: string, dryRun: boolean): Promise<
     return `openai_models: would post ${id} [${via}] (dry)\n---\n${post}`;
   }
   if (!env.TELEGRAM_MODELS_CHAT_ID) return "models: no chat configured";
-  await sendMessage(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_MODELS_CHAT_ID, post);
+  const messageId = await sendMessage(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_MODELS_CHAT_ID, post);
+  await recordAction(env.ARCHIVE, {
+    chat: env.TELEGRAM_MODELS_CHAT_ID,
+    kind: "send",
+    messageId,
+    text: post,
+  });
   return `openai_models: force-posted ${id} [${via}]`;
 }
 
@@ -820,6 +846,35 @@ export async function runStatusTick(
 // opens and resolves at once.
 const STATUS_CRON = "*/5 * * * *";
 
+/**
+ * Read-only view of the archive, behind its own token: a puller holding it can
+ * read what was posted but never trigger the pipeline or post (issue #2).
+ */
+async function handleArchive(request: Request, env: Env, url: URL): Promise<Response> {
+  if (request.method !== "GET") return new Response("method not allowed", { status: 405 });
+  if (
+    !env.ARCHIVE_READ_SECRET ||
+    request.headers.get("authorization") !== `Bearer ${env.ARCHIVE_READ_SECRET}`
+  ) {
+    return new Response("forbidden", { status: 403 });
+  }
+  const photo = url.pathname.match(/^\/archive\/photo\/(\d+)\/(\d+)$/);
+  if (photo) {
+    const found = await readPhoto(env.ARCHIVE, Number(photo[1]), Number(photo[2]));
+    if (!found) return new Response("not found", { status: 404 });
+    return new Response(found.bytes, {
+      headers: {
+        "content-type": found.mediaType,
+        "cache-control": "private, max-age=31536000, immutable",
+      },
+    });
+  }
+  if (url.pathname !== "/archive") return new Response("not found", { status: 404 });
+  const since = url.searchParams.get("since") ?? "0";
+  if (!/^\d+$/.test(since)) return new Response("bad since\n", { status: 400 });
+  return Response.json(await readActions(env.ARCHIVE, Number(since)));
+}
+
 export default {
   async scheduled(event, env, _ctx) {
     console.log(event.cron === STATUS_CRON ? await runStatusTick(env) : await runPipeline(env));
@@ -838,6 +893,9 @@ export default {
       }
       await handleTelegramUpdate(env, await request.json());
       return new Response("ok");
+    }
+    if (url.pathname === "/archive" || url.pathname.startsWith("/archive/")) {
+      return handleArchive(request, env, url);
     }
     if (url.pathname !== "/run") return new Response("not found", { status: 404 });
     if (request.method !== "POST") return new Response("method not allowed", { status: 405 });

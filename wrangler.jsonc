@@ -14,6 +14,13 @@
   "kv_namespaces": [
     { "binding": "RELEASES", "id": "2254c70148884faa8d27f6fd73e08e81" }
   ],
+  "d1_databases": [
+    {
+      "binding": "ARCHIVE",
+      "database_name": "smallbot-archive",
+      "database_id": "cc717820-d21b-4e7a-8214-8dd0e5779566"
+    }
+  ],
   "vars": {
     "TELEGRAM_CHAT_ID": "@claudecode_changelog",
     "TELEGRAM_CODEX_CHAT_ID": "@codex_changelog",
