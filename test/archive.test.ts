@@ -86,6 +86,15 @@ describe("/archive endpoint", () => {
     expect((await get(env, "/archive", "Bearer wrong")).status).toBe(403);
     const unconfigured = { ...env, ARCHIVE_READ_SECRET: undefined } as Env;
     expect((await get(unconfigured, "/archive", "Bearer read-secret")).status).toBe(403);
+    const empty = { ...env, ARCHIVE_READ_SECRET: "  " } as Env;
+    expect((await get(empty, "/archive", "Bearer ")).status).toBe(403);
+  });
+
+  it("accepts any token from the whitespace-separated list", async () => {
+    const env = { ...archiveEnv(fakeD1()), ARCHIVE_READ_SECRET: "first-token second-token" } as Env;
+    expect((await get(env, "/archive", "Bearer first-token")).status).toBe(200);
+    expect((await get(env, "/archive", "Bearer second-token")).status).toBe(200);
+    expect((await get(env, "/archive", "Bearer third-token")).status).toBe(403);
   });
 
   it("is GET-only and validates since", async () => {

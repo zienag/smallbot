@@ -48,6 +48,7 @@ All credentials live in macOS Keychain (never in the repo; `.dev.vars` is genera
 | `telegram` | `bot-token-smallbot` | Bot token |
 | `smallbot` | `trigger-secret` | `/run` endpoint secret |
 | `smallbot` | `archive-read-secret` | `/archive` read-only token — deliberately not the trigger secret: a leak can read the archive, never post |
+| `smallbot` | `archive-read-secret-work` | same, for the work machine; the worker secret is the whitespace-joined list of all of them |
 | `telegram` | `bot-token-anthropic_status_watch_bot` | status bot token (Follow buttons + DMs) |
 | `telegram` | `webhook-secret-anthropic_status_watch_bot` | status bot webhook `secret_token` |
 | `cloudflare` | `api-token-smallbot` | scoped deploy token (Workers + KV) |

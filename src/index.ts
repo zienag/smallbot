@@ -85,7 +85,8 @@ export interface Env {
   // Read-only use: the model list is what tells us OpenAI shipped something.
   OPENAI_API_KEY?: string;
   TRIGGER_SECRET: string;
-  // Grants archive reads only — deliberately not TRIGGER_SECRET, which can post.
+  // Grants archive reads only — deliberately not TRIGGER_SECRET, which can
+  // post. Whitespace-separated list, one token per consumer.
   ARCHIVE_READ_SECRET?: string;
   TELEGRAM_CHAT_ID: string;
   // A source with no channel configured is simply off.
@@ -852,10 +853,12 @@ const STATUS_CRON = "*/5 * * * *";
  */
 async function handleArchive(request: Request, env: Env, url: URL): Promise<Response> {
   if (request.method !== "GET") return new Response("method not allowed", { status: 405 });
-  if (
-    !env.ARCHIVE_READ_SECRET ||
-    request.headers.get("authorization") !== `Bearer ${env.ARCHIVE_READ_SECRET}`
-  ) {
+  // The secret is a whitespace-separated list: one token per consumer, so one
+  // can be rotated or revoked without touching the others.
+  const allowed = (env.ARCHIVE_READ_SECRET ?? "").split(/\s+/).filter(Boolean);
+  const header = request.headers.get("authorization") ?? "";
+  const token = header.startsWith("Bearer ") ? header.slice(7) : "";
+  if (!token || !allowed.includes(token)) {
     return new Response("forbidden", { status: 403 });
   }
   const photo = url.pathname.match(/^\/archive\/photo\/(\d+)\/(\d+)$/);

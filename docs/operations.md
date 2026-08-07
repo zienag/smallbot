@@ -23,7 +23,13 @@ Dry responses carry the post text for every source except `claude`/`codex`, wher
 
 ## `/archive`
 
-Read-only feed of everything the bot did to the channels (issue #2), for an external mirror. GET-only, auth via `Authorization: Bearer <ARCHIVE_READ_SECRET>` (Keychain: `smallbot`/`archive-read-secret`) — a token that can read but never post or trigger.
+Read-only feed of everything the bot did to the channels (issue #2), for an external mirror. GET-only, auth via `Authorization: Bearer <token>` — a token that can read but never post or trigger. `ARCHIVE_READ_SECRET` is a whitespace-separated list, one token per consumer (Keychain: `smallbot`/`archive-read-secret`, `archive-read-secret-work`, …); to add or revoke one, edit the Keychain entries and re-put the joined list:
+
+```sh
+printf '%s %s' "$(security find-generic-password -s smallbot -a archive-read-secret -w)" \
+  "$(security find-generic-password -s smallbot -a archive-read-secret-work -w)" \
+  | npx wrangler secret put ARCHIVE_READ_SECRET
+```
 
 ```sh
 curl "https://smallbot.zienag.workers.dev/archive?since=0" \
@@ -46,6 +52,8 @@ npx wrangler d1 execute smallbot-archive --remote \
 **After `wrangler deploy` the old instance can keep serving `/run` for up to ~a minute** — a "fix didn't work" verdict right after deploying is unreliable (bit us twice), re-check before debugging.
 
 **A newly added cron trigger can register but never fire.** The `*/5` cron added on 2026-07-27 was listed by the `/schedules` API yet produced zero invocations for a full day (per-minute GraphQL `workersInvocationsAdaptive` showed only `*/15` ticks), then came alive after the next day's redeploy re-put the schedule set. After adding a cron, don't trust the deploy output or the schedules listing — verify a real tick: `npx wrangler tail smallbot --format json` across a matching minute, or the per-minute GraphQL query.
+
+**`wrangler secret put` immediately followed by `wrangler deploy` can lose the secret**: the deploy snapshots bindings into a new version and can pick up the pre-put value (bit us with `ARCHIVE_READ_SECRET` — the token 403'd until the secret was re-put). Deploy first, then put secrets; after a put-then-deploy, re-put.
 
 **`--remote` needs `CLOUDFLARE_API_TOKEN` exported** or it dies on expired auth, and it authenticates `/run` against the **`.dev.vars` `TRIGGER_SECRET`**, which is not the Keychain one — reading the wrong one gets a bare `forbidden`.
 
