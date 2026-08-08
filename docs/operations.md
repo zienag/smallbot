@@ -8,7 +8,7 @@ POST-only, auth via `Authorization: Bearer <TRIGGER_SECRET>` (never a query para
 |---|---|
 | *(none)* | normal pipeline, all sources except status |
 | `version=X` | force-post one version (never touches KV) |
-| `source=claude\|codex\|models\|openai\|blog\|openai_blog\|openai_dev\|status` | which source the forced version/id/title/url-substring belongs to |
+| `source=claude\|codex\|models\|openai\|blog\|openai_blog\|openai_dev\|youtube\|status` | which source the forced version/id/title/url-substring belongs to |
 | `only=status` | run just the status tick (what the `*/5` cron does) |
 | `dry=1\|0` | override `DRY_RUN` |
 

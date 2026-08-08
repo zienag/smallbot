@@ -46,6 +46,16 @@ import {
 } from "./openai_dev";
 import { fetchNpmLatest } from "./npm";
 import {
+  YOUTUBE_CHANNELS,
+  type YouTubeChannel,
+  digestVideo,
+  fetchVideoFeed,
+  formatVideoPost,
+  isRecentVideo,
+  isShort,
+  youtubeSeenKey,
+} from "./youtube";
+import {
   type Incident,
   STATUS_INCIDENTS_KEY,
   type StatusState,
@@ -532,6 +542,97 @@ async function buildDevPost(
   return { text: true, tier: digest.tier, body: formatDevPost(post, digest.bullets) };
 }
 
+// Each company's videos land in its blog channel, next to its written posts.
+function youtubeChatId(env: Env, channel: YouTubeChannel): string | undefined {
+  return channel.key === "openai"
+    ? env.TELEGRAM_OPENAI_BLOG_CHAT_ID
+    : env.TELEGRAM_ANTHROPIC_BLOG_CHAT_ID;
+}
+
+async function watchYouTubeChannel(
+  env: Env,
+  channel: YouTubeChannel,
+  chatId: string,
+  dryRun: boolean,
+): Promise<string> {
+  const tag = `youtube_${channel.key}`;
+  const seenKey = youtubeSeenKey(channel);
+  const videos = await fetchVideoFeed(channel.channelId);
+  const seenRaw = await env.RELEASES.get(seenKey);
+  if (!seenRaw) {
+    if (dryRun) return `${tag}: would seed ${videos.length} seen (dry)`;
+    await env.RELEASES.put(seenKey, JSON.stringify(videos.map((v) => v.videoId)));
+    return `${tag}: seeded ${videos.length} seen, nothing posted`;
+  }
+  const seen = new Set(JSON.parse(seenRaw) as string[]);
+  const unseen = videos.filter((v) => !seen.has(v.videoId));
+  // Resurfaced history is absorbed into the seen-set without a post.
+  const now = Date.now();
+  const stale = unseen.filter((v) => !isRecentVideo(v, now));
+  if (stale.length > 0 && !dryRun) {
+    for (const video of stale) seen.add(video.videoId);
+    await env.RELEASES.put(seenKey, JSON.stringify([...seen]));
+  }
+  let skipped = stale.length > 0 ? `, skipped ${stale.length} stale` : "";
+  // Oldest first; the cap bounds LLM calls per tick, the tail catches up next tick.
+  const fresh = unseen
+    .filter((v) => isRecentVideo(v, now))
+    .reverse()
+    .slice(0, MAX_BLOG_POSTS_PER_TICK);
+  if (fresh.length === 0) return `${tag}: nothing new${skipped}`;
+
+  const posted: string[] = [];
+  let shorts = 0;
+  for (const video of fresh) {
+    // A Short is a promo cut of a video the channel carries in full — absorbed
+    // silently, not posted.
+    if (await isShort(video.videoId)) {
+      shorts++;
+      if (!dryRun) {
+        seen.add(video.videoId);
+        await env.RELEASES.put(seenKey, JSON.stringify([...seen]));
+      }
+      continue;
+    }
+    const digest = await digestVideo(env.ANTHROPIC_API_KEY, env.RELEASES, channel.label, video);
+    const post = formatVideoPost(channel.label, video, digest.bullets);
+    if (dryRun) {
+      console.log(`DRY_RUN: would post [${digest.tier}] ${video.url}:\n${post}`);
+    } else {
+      await sendTiered(env, chatId, post, digest.tier);
+      seen.add(video.videoId);
+      await env.RELEASES.put(seenKey, JSON.stringify([...seen]));
+    }
+    posted.push(`${video.title} [${digest.tier}]`);
+  }
+  if (shorts > 0) skipped += `, ${shorts} shorts`;
+  if (posted.length === 0) return `${tag}: nothing new${skipped}`;
+  return `${tag}: posted ${posted.join(" | ")}${skipped}${dryRun ? " (dry)" : ""}`;
+}
+
+// Test hook /run?source=youtube&version=<title or video-id substring>, never
+// touches KV. Reports whether the Shorts probe would drop the video.
+async function forceYouTubeVideo(env: Env, query: string, dryRun: boolean): Promise<string> {
+  const q = query.toLowerCase();
+  for (const channel of YOUTUBE_CHANNELS) {
+    const video = (await fetchVideoFeed(channel.channelId)).find(
+      (v) => v.title.toLowerCase().includes(q) || v.videoId === query,
+    );
+    if (!video) continue;
+    const short = await isShort(video.videoId);
+    const digest = await digestVideo(env.ANTHROPIC_API_KEY, env.RELEASES, channel.label, video);
+    const post = formatVideoPost(channel.label, video, digest.bullets);
+    if (dryRun) {
+      return `youtube_${channel.key}: "${video.title}" tier=${digest.tier} short=${short} (dry)\n---\n${post}`;
+    }
+    const chatId = youtubeChatId(env, channel);
+    if (!chatId) return `youtube_${channel.key}: no chat configured`;
+    await sendTiered(env, chatId, post, digest.tier);
+    return `youtube_${channel.key}: force-posted "${video.title}" [${digest.tier}]`;
+  }
+  return `youtube: no video matching ${query}`;
+}
+
 const MAX_STATUS_CARDS_PER_TICK = 5;
 
 function followKeyboard(incident: Incident): InlineKeyboard | undefined {
@@ -765,6 +866,7 @@ export async function runPipeline(
     if (opts.source === "blog") return forceBlogEntry(env, opts.forceVersion, dryRun);
     if (opts.source === "openai_blog") return forceOpenAiBlogItem(env, opts.forceVersion, dryRun);
     if (opts.source === "openai_dev") return forceDevPost(env, opts.forceVersion, dryRun);
+    if (opts.source === "youtube") return forceYouTubeVideo(env, opts.forceVersion, dryRun);
     if (opts.source === "status") return forceStatusIncident(env, opts.forceVersion, dryRun);
     const source = sources.find((s) => s.key === (opts.source ?? "claude"));
     if (!source) return `unknown source ${opts.source}`;
@@ -817,6 +919,15 @@ export async function runPipeline(
       statuses.push(await watchOpenAiDevBlog(env, dryRun));
     } catch (err) {
       statuses.push(`openai_dev: failed: ${err}`);
+    }
+  }
+  for (const channel of YOUTUBE_CHANNELS) {
+    const chatId = youtubeChatId(env, channel);
+    if (!chatId) continue;
+    try {
+      statuses.push(await watchYouTubeChannel(env, channel, chatId, dryRun));
+    } catch (err) {
+      statuses.push(`youtube_${channel.key}: failed: ${err}`);
     }
   }
   return statuses.join("\n");

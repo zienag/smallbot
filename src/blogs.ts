@@ -89,7 +89,8 @@ export interface BlogDigest {
 }
 
 // Split so the two prompts differ only in where the article comes from.
-const DIGEST_TASK = `\
+// Also shared with the YouTube watch, whose article is a video description.
+export const DIGEST_TASK = `\
 Pick the 2-4 points an engineer would actually care about: concrete \
 capabilities, numbers, and takeaways, not marketing framing. Each bullet is \
 one short sentence. Wrap commands, flags, and other identifiers in backticks. \

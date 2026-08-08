@@ -3,6 +3,7 @@ import type { Incident } from "../src/status";
 import { STATUS_INCIDENTS_KEY, type StatusState } from "../src/status";
 import type { Env } from "../src/index";
 import { runPipeline, runStatusTick } from "../src/index";
+import { YOUTUBE_CHANNELS } from "../src/youtube";
 
 describe("release feed", () => {
   it("posts candidates oldest-first and advances the cursor after each post", async () => {
@@ -89,6 +90,44 @@ describe("tiered blog posts", () => {
   });
 });
 
+describe("youtube videos", () => {
+  it("posts a new video, drops the Short, absorbs the stale one, marks all seen", async () => {
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1000;
+    mocks.fetchAllBlogEntries.mockResolvedValue([]);
+    const claude = YOUTUBE_CHANNELS.find((c) => c.key === "claude")!;
+    mocks.fetchVideoFeed.mockImplementation(async (channelId: string) =>
+      channelId === claude.channelId
+        ? [
+            { videoId: "vid1", title: "How auto mode works", url: "https://www.youtube.com/watch?v=vid1", published: now - day, description: "d" },
+            { videoId: "short1", title: "Promo cut", url: "https://www.youtube.com/watch?v=short1", published: now - 2 * day, description: "" },
+            { videoId: "old1", title: "Ancient", url: "https://www.youtube.com/watch?v=old1", published: now - 30 * day, description: "" },
+          ]
+        : [],
+    );
+    mocks.isShort.mockImplementation(async (id: string) => id === "short1");
+    const kv = fakeKv({
+      "youtube_seen:claude": JSON.stringify(["seen1"]),
+      "youtube_seen:anthropic": JSON.stringify([]),
+    });
+    const env = { ...feedEnv(kv), TELEGRAM_CHAT_ID: undefined, TELEGRAM_ANTHROPIC_BLOG_CHAT_ID: "@blogs" };
+
+    const result = await runPipeline(env as unknown as Env);
+
+    expect(result).toContain("youtube_claude: posted How auto mode works [normal], skipped 1 stale, 1 shorts");
+    expect(mocks.sendMessage).toHaveBeenCalledTimes(1);
+    expect(mocks.sendMessage.mock.calls[0][1]).toBe("@blogs");
+    expect(mocks.sendMessage.mock.calls[0][2]).toContain("Claude YouTube");
+    expect(mocks.sendMessage.mock.calls[0][2]).toContain("How auto mode works");
+    expect(JSON.parse(kv.store.get("youtube_seen:claude")!)).toEqual([
+      "seen1",
+      "old1",
+      "short1",
+      "vid1",
+    ]);
+  });
+});
+
 describe("status cards", () => {
   it("opens a high-impact card loud, pins it, and records the posted updates", async () => {
     const incident = makeIncident({ impact: "major" });
@@ -153,6 +192,9 @@ const mocks = vi.hoisted(() => ({
   fetchIncidents: vi.fn(),
   fetchAllBlogEntries: vi.fn(),
   digestBlogPost: vi.fn(),
+  fetchVideoFeed: vi.fn(),
+  isShort: vi.fn(),
+  digestVideo: vi.fn(),
 }));
 
 vi.mock("../src/telegram", async (importOriginal) => ({
@@ -175,6 +217,12 @@ vi.mock("../src/blogs", async (importOriginal) => ({
   fetchAllBlogEntries: mocks.fetchAllBlogEntries,
   digestBlogPost: mocks.digestBlogPost,
 }));
+vi.mock("../src/youtube", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/youtube")>()),
+  fetchVideoFeed: mocks.fetchVideoFeed,
+  isShort: mocks.isShort,
+  digestVideo: mocks.digestVideo,
+}));
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -188,6 +236,9 @@ beforeEach(() => {
   mocks.summarize.mockImplementation(async (_key, _kv, _product, version) => ({
     bullets: [`summary of ${version}`],
   }));
+  mocks.fetchVideoFeed.mockResolvedValue([]);
+  mocks.isShort.mockResolvedValue(false);
+  mocks.digestVideo.mockResolvedValue({ tier: "normal", bullets: ["a fact"] });
 });
 
 interface FakeKv {

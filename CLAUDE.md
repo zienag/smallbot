@@ -14,8 +14,9 @@ Cloudflare Worker (crons `*/15` and `*/5`) that watches release feeds and posts 
 | Anthropic news + engineering | src/blogs.ts | `@anthropic_blogs` |
 | OpenAI news + developer blog | src/openai_news.ts, src/openai_dev.ts | `@openai_blogs` |
 | Anthropic incidents | src/status.ts, src/status_bot.ts | `@anthropic_status` |
+| YouTube channels (OpenAI; Anthropic + Claude) | src/youtube.ts | the matching blog channel |
 
-Each blog channel carries one company's news and its technical writing together, reposted with an LLM importance tier (major = pin, normal, minor = silent). The incident watch is the only source with no LLM in it and the only one on its own bot, `@anthropic_status_watch_bot`.
+Each blog channel carries one company's news, its technical writing, and its YouTube videos together, reposted with an LLM importance tier (major = pin, normal, minor = silent). The incident watch is the only source with no LLM in it and the only one on its own bot, `@anthropic_status_watch_bot`.
 
 Per-source detail — feeds, gates, matching rules, test hooks — lives in `.claude/rules/` and loads by itself when you open the source's file.
 
@@ -69,7 +70,7 @@ Pipeline per tick (src/index.ts), per feed source: fetch releases → candidates
 - **KV is written only after a successful Telegram post.** An error aborts that source's loop; the next tick resumes from the same place. This is the idempotency/catch-up mechanism — don't reorder it.
 - **First run (empty KV) posts only the newest item, not history.** Same for every seen-set: the first tick seeds silently.
 - **A feed's own novelty signal is not enough** — a seen-set alone will replay whatever a publisher backfills. Every watch pairs it with a second gate (age, an npm dist-tag, the newsroom's own list, an API diff), and a fact is never inferred by an LLM from a title.
-- KV keys: `last_posted_version` (claude), `codex_last_posted_version`, `known_models` / `openai_known_models` (JSON id arrays), `openai_blog_seen` (JSON guid array), `anthropic_blog_seen` / `openai_dev_blog_seen` (JSON url arrays), `status_incidents` (JSON incident-id → `{messageId, postedUpdates}`), `status_subs:<incident id>` (JSON chat-id arrays), `resolved_model` / `resolved_model_sonnet` (24h TTL caches).
+- KV keys: `last_posted_version` (claude), `codex_last_posted_version`, `known_models` / `openai_known_models` (JSON id arrays), `openai_blog_seen` (JSON guid array), `anthropic_blog_seen` / `openai_dev_blog_seen` (JSON url arrays), `status_incidents` (JSON incident-id → `{messageId, postedUpdates}`), `status_subs:<incident id>` (JSON chat-id arrays), `youtube_seen:<channel key>` (JSON video-id arrays), `resolved_model` / `resolved_model_sonnet` (24h TTL caches).
 - **Every channel action (send/edit/pin/unpin) is archived to D1** (`ARCHIVE` binding, src/archive.ts) right after the Telegram call succeeds, and served read-only at `/archive` under its own token. The write is best-effort by design — a failed insert must not abort the source loop, since a retry would repost to the live channel. 30-day retention, pruned on write; details in docs/operations.md.
 - **The status watch runs on its own `*/5` cron, outside `runPipeline`** — the two schedules coincide every 15 minutes and would race on one KV key. `STATUS_CRON` in src/index.ts must match the string in wrangler.jsonc literally; a drift silently kills the channel.
 - **openai.com pages are never fetched directly** — the newsroom is behind a Cloudflare challenge and a plain fetch earns a ~10h 403. Evidence and the working rungs: docs/openai-access.md. Anthropic press pages are the one thing fetched directly (they 403 non-Mozilla UAs; `BOT_UA` in src/html.ts).
