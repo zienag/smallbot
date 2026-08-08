@@ -42,16 +42,16 @@ describe("formatVideoPost", () => {
     description: "",
   };
 
-  it("renders a linked header and inline-formatted bullets", () => {
-    expect(formatVideoPost("Claude YouTube", video, ["Run `claude` to start"])).toBe(
-      '<b>Claude YouTube: <a href="https://www.youtube.com/watch?v=abc">' +
-        "Codex &lt;3 plugins</a></b>\n\n• Run <code>claude</code> to start",
+  it("leads with the bare title — no source label — and inline-formats bullets", () => {
+    expect(formatVideoPost(video, ["Run `claude` to start"])).toBe(
+      '<b><a href="https://www.youtube.com/watch?v=abc">Codex &lt;3 plugins</a></b>' +
+        "\n\n• Run <code>claude</code> to start",
     );
   });
 
   it("degrades to header only without bullets", () => {
-    expect(formatVideoPost("Claude YouTube", video, [])).toBe(
-      '<b>Claude YouTube: <a href="https://www.youtube.com/watch?v=abc">Codex &lt;3 plugins</a></b>',
+    expect(formatVideoPost(video, [])).toBe(
+      '<b><a href="https://www.youtube.com/watch?v=abc">Codex &lt;3 plugins</a></b>',
     );
   });
 });

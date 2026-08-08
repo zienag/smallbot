@@ -48,7 +48,7 @@ export async function sendMessage(
   botToken: string,
   chatId: string | number,
   text: string,
-  opts: { silent?: boolean; keyboard?: InlineKeyboard } = {},
+  opts: { silent?: boolean; keyboard?: InlineKeyboard; linkPreview?: boolean } = {},
 ): Promise<number> {
   const res = await fetch(`https://api.telegram.org/bot${botToken}/sendMessage`, {
     method: "POST",
@@ -57,7 +57,8 @@ export async function sendMessage(
       chat_id: chatId,
       text,
       parse_mode: "HTML",
-      link_preview_options: { is_disabled: true },
+      // Previews are off except where the card is the content (YouTube posts).
+      link_preview_options: { is_disabled: !opts.linkPreview },
       disable_notification: opts.silent ?? false,
       ...(opts.keyboard ? { reply_markup: opts.keyboard } : {}),
     }),

@@ -13,4 +13,6 @@ Seen-set per channel (`youtube_seen:<key>`, JSON video-id array), first run seed
 
 Digest: one LLM call on title + description — the video itself is never watched, the prompt says so and tells the model to leave bullets empty rather than invent. Shares `DIGEST_TASK`/`TIER_CRITERIA` with the blog watches and delivers through the same `sendTiered`.
 
+**Post format (owner-specified)**: the bare linked title leads, no source label — and the link preview is ON for these posts only (`linkPreview: true` through `sendTiered`), because the YouTube card names the channel and shows the player; a label would duplicate it.
+
 Test hook: `/run?source=youtube&version=<title or video-id substring>&dry=1` — searches all three feeds, reports the tier and whether the Shorts probe would drop it.

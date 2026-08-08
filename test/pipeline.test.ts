@@ -129,8 +129,9 @@ describe("youtube videos", () => {
     expect(result).toContain("youtube_claude: posted How auto mode works [normal], skipped 1 stale, 1 shorts");
     expect(mocks.sendMessage).toHaveBeenCalledTimes(1);
     expect(mocks.sendMessage.mock.calls[0][1]).toBe("@blogs");
-    expect(mocks.sendMessage.mock.calls[0][2]).toContain("Claude YouTube");
     expect(mocks.sendMessage.mock.calls[0][2]).toContain("How auto mode works");
+    // The video card is the point: YouTube posts are the only ones with a preview.
+    expect(mocks.sendMessage.mock.calls[0][3]).toEqual({ silent: false, linkPreview: true });
     expect(JSON.parse(kv.store.get("youtube_seen:claude")!)).toEqual([
       "seen1",
       "old1",

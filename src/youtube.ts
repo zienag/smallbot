@@ -127,9 +127,13 @@ export async function digestVideo(
   return { tier: digest.tier, bullets: digest.bullets.slice(0, 4) };
 }
 
-/** Same shape as the blog posts the channels already carry. */
-export function formatVideoPost(label: string, video: Video, bullets: string[]): string {
-  const head = `<b>${escapeHtml(label)}: <a href="${video.url}">${escapeHtml(video.title)}</a></b>`;
+/**
+ * No source label, unlike the blog posts: the title leads and the link
+ * preview card (enabled only for these posts) already says it is YouTube
+ * and names the channel. Owner-approved shape.
+ */
+export function formatVideoPost(video: Video, bullets: string[]): string {
+  const head = `<b><a href="${video.url}">${escapeHtml(video.title)}</a></b>`;
   if (bullets.length === 0) return head;
   return `${head}\n\n${bullets.map((b) => `• ${formatInline(b)}`).join("\n")}`;
 }

@@ -352,9 +352,18 @@ async function buildOpenAiModelsPost(
 }
 
 // The tier tunes delivery: minor posts silently, major additionally pins.
-async function sendTiered(env: Env, chatId: string, post: string, tier: Tier): Promise<void> {
+async function sendTiered(
+  env: Env,
+  chatId: string,
+  post: string,
+  tier: Tier,
+  opts: { linkPreview?: boolean } = {},
+): Promise<void> {
   const silent = tier === "minor";
-  const messageId = await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, post, { silent });
+  const messageId = await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, post, {
+    silent,
+    ...(opts.linkPreview ? { linkPreview: true } : {}),
+  });
   await recordAction(env.ARCHIVE, { chat: chatId, kind: "send", messageId, text: post, silent, tier });
   if (tier === "major") {
     // The pin is nice-to-have; the post is already out.
@@ -372,8 +381,17 @@ async function sendTiered(env: Env, chatId: string, post: string, tier: Tier): P
  * to the owner's DM instead. No archive entry and no pin — the channel did
  * nothing; the silent flag is kept so the DM mirrors the tier's delivery.
  */
-async function sendPreviewTiered(env: Env, post: string, tier: Tier, previewTo: string): Promise<void> {
-  await sendMessage(env.TELEGRAM_BOT_TOKEN, previewTo, post, { silent: tier === "minor" });
+async function sendPreviewTiered(
+  env: Env,
+  post: string,
+  tier: Tier,
+  previewTo: string,
+  opts: { linkPreview?: boolean } = {},
+): Promise<void> {
+  await sendMessage(env.TELEGRAM_BOT_TOKEN, previewTo, post, {
+    silent: tier === "minor",
+    ...(opts.linkPreview ? { linkPreview: true } : {}),
+  });
 }
 
 const MAX_BLOG_POSTS_PER_TICK = 5;
@@ -616,11 +634,11 @@ async function watchYouTubeChannel(
       continue;
     }
     const digest = await digestVideo(env.ANTHROPIC_API_KEY, env.RELEASES, channel.label, video);
-    const post = formatVideoPost(channel.label, video, digest.bullets);
+    const post = formatVideoPost(video, digest.bullets);
     if (dryRun) {
       console.log(`DRY_RUN: would post [${digest.tier}] ${video.url}:\n${post}`);
     } else {
-      await sendTiered(env, chatId, post, digest.tier);
+      await sendTiered(env, chatId, post, digest.tier, { linkPreview: true });
       seen.add(video.videoId);
       await env.RELEASES.put(seenKey, JSON.stringify([...seen]));
     }
@@ -647,9 +665,9 @@ async function forceYouTubeVideo(
     if (!video) continue;
     const short = await isShort(video.videoId);
     const digest = await digestVideo(env.ANTHROPIC_API_KEY, env.RELEASES, channel.label, video);
-    const post = formatVideoPost(channel.label, video, digest.bullets);
+    const post = formatVideoPost(video, digest.bullets);
     if (previewTo) {
-      await sendPreviewTiered(env, post, digest.tier, previewTo);
+      await sendPreviewTiered(env, post, digest.tier, previewTo, { linkPreview: true });
       return `youtube_${channel.key}: previewed "${video.title}" [${digest.tier}] short=${short}`;
     }
     if (dryRun) {
@@ -657,7 +675,7 @@ async function forceYouTubeVideo(
     }
     const chatId = youtubeChatId(env, channel);
     if (!chatId) return `youtube_${channel.key}: no chat configured`;
-    await sendTiered(env, chatId, post, digest.tier);
+    await sendTiered(env, chatId, post, digest.tier, { linkPreview: true });
     return `youtube_${channel.key}: force-posted "${video.title}" [${digest.tier}]`;
   }
   return `youtube: no video matching ${query}`;
