@@ -50,6 +50,7 @@ All credentials live in macOS Keychain (never in the repo; `.dev.vars` is genera
 | `smallbot` | `trigger-secret` | `/run` endpoint secret |
 | `smallbot` | `archive-read-secret` | `/archive` read-only token — deliberately not the trigger secret: a leak can read the archive, never post |
 | `smallbot` | `archive-read-secret-work` | same, for the work machine; the worker secret is the whitespace-joined list of all of them |
+| `telegram` | `manager-chat-id-zienag_botomat_bot` | owner's Telegram user id — worker secret `TELEGRAM_OWNER_CHAT_ID`, the `/run?preview=1` DM target |
 | `telegram` | `bot-token-anthropic_status_watch_bot` | status bot token (Follow buttons + DMs) |
 | `telegram` | `webhook-secret-anthropic_status_watch_bot` | status bot webhook `secret_token` |
 | `cloudflare` | `api-token-smallbot` | scoped deploy token (Workers + KV) |
@@ -74,7 +75,7 @@ Pipeline per tick (src/index.ts), per feed source: fetch releases → candidates
 - **Every channel action (send/edit/pin/unpin) is archived to D1** (`ARCHIVE` binding, src/archive.ts) right after the Telegram call succeeds, and served read-only at `/archive` under its own token. The write is best-effort by design — a failed insert must not abort the source loop, since a retry would repost to the live channel. 30-day retention, pruned on write; details in docs/operations.md.
 - **The status watch runs on its own `*/5` cron, outside `runPipeline`** — the two schedules coincide every 15 minutes and would race on one KV key. `STATUS_CRON` in src/index.ts must match the string in wrangler.jsonc literally; a drift silently kills the channel.
 - **openai.com pages are never fetched directly** — the newsroom is behind a Cloudflare challenge and a plain fetch earns a ~10h 403. Evidence and the working rungs: docs/openai-access.md. Anthropic press pages are the one thing fetched directly (they 403 non-Mozilla UAs; `BOT_UA` in src/html.ts).
-- **The channels have live subscribers, and post format is owner-approved.** Anything that is not the cron doing its normal job — a force-post, a repost of old items, a deletion, a pin — needs the owner's yes for that exact action; `dry=1` renders the same post and publishes nothing, so iterate there.
+- **The channels have live subscribers, and post format is owner-approved.** Anything that is not the cron doing its normal job — a force-post, a repost of old items, a deletion, a pin — needs the owner's yes for that exact action; `dry=1` renders the same post and publishes nothing, and `preview=1` delivers it to the owner's DM instead of the channel — iterate there.
 - **Everything is English** — posts, bot and channel descriptions, code comments, docs. Every prompt that generates post text must say so outright; one that doesn't has already shipped a post in another language.
 - **Don't hardcode model bumps.** The digest model is resolved from `/v1/models` at runtime (src/summarize.ts).
 

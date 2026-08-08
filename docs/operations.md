@@ -11,6 +11,7 @@ POST-only, auth via `Authorization: Bearer <TRIGGER_SECRET>` (never a query para
 | `source=claude\|codex\|models\|openai\|blog\|openai_blog\|openai_dev\|youtube\|status` | which source the forced version/id/title/url-substring belongs to |
 | `only=status` | run just the status tick (what the `*/5` cron does) |
 | `dry=1\|0` | override `DRY_RUN` |
+| `preview=1` | with `source=`+`version=`: deliver the force-posted message to the owner's DM (`TELEGRAM_OWNER_CHAT_ID`) instead of the channel — real Telegram rendering, no archive entry, no pin |
 
 A dry run exercises the full pipeline including a real LLM call, posts nothing, and doesn't touch `last_posted_version`:
 

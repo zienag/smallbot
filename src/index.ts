@@ -110,6 +110,10 @@ export interface Env {
   // webhook, not on Bipozavr.
   TELEGRAM_STATUS_BOT_TOKEN?: string;
   TELEGRAM_STATUS_BOT_USERNAME?: string;
+  // The owner's DM with the bot: where /run?preview=1 delivers a force-posted
+  // message instead of the live channel. A secret — the repo is public and the
+  // numeric id is personal.
+  TELEGRAM_OWNER_CHAT_ID?: string;
   STATUS_WEBHOOK_SECRET?: string;
   DRY_RUN?: string;
 }
@@ -162,6 +166,7 @@ async function postRelease(
   source: FeedSource,
   release: FeedRelease,
   dryRun: boolean,
+  previewTo?: string,
 ): Promise<void> {
   const summary = await summarize(
     env.ANTHROPIC_API_KEY,
@@ -177,6 +182,10 @@ async function postRelease(
     summary,
     notes: source.quoteNotes ? release.notes : undefined,
   });
+  if (previewTo) {
+    await sendMessage(env.TELEGRAM_BOT_TOKEN, previewTo, post);
+    return;
+  }
   if (dryRun) {
     console.log(`DRY_RUN: would post ${source.product} ${release.version} (${post.length} chars):\n${post}`);
     return;
@@ -247,20 +256,23 @@ async function postModelsMessage(
   env: Env,
   post: string,
   announcements: { press?: { photos: { bytes: ArrayBuffer; mediaType: string }[] } }[],
+  previewTo?: string,
 ): Promise<void> {
-  const chatId = env.TELEGRAM_MODELS_CHAT_ID!;
+  const chatId = previewTo ?? env.TELEGRAM_MODELS_CHAT_ID!;
   const photos = announcements.flatMap((a) => a.press?.photos ?? []).slice(0, 10);
   if (photos.length > 0 && post.length <= CAPTION_LIMIT) {
     try {
       const messageId = await sendAlbum(env.TELEGRAM_BOT_TOKEN, chatId, post, photos);
-      await recordAction(env.ARCHIVE, { chat: chatId, kind: "send", messageId, text: post, photos });
+      if (!previewTo)
+        await recordAction(env.ARCHIVE, { chat: chatId, kind: "send", messageId, text: post, photos });
       return;
     } catch (err) {
       console.log(`album failed, falling back to plain text: ${err}`);
     }
   }
   const messageId = await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, post);
-  await recordAction(env.ARCHIVE, { chat: chatId, kind: "send", messageId, text: post });
+  if (!previewTo)
+    await recordAction(env.ARCHIVE, { chat: chatId, kind: "send", messageId, text: post });
 }
 
 /**
@@ -353,6 +365,15 @@ async function sendTiered(env: Env, chatId: string, post: string, tier: Tier): P
       console.log(`pin failed in ${chatId}: ${err}`);
     }
   }
+}
+
+/**
+ * Preview: the exact message a force-post would put in the channel, delivered
+ * to the owner's DM instead. No archive entry and no pin — the channel did
+ * nothing; the silent flag is kept so the DM mirrors the tier's delivery.
+ */
+async function sendPreviewTiered(env: Env, post: string, tier: Tier, previewTo: string): Promise<void> {
+  await sendMessage(env.TELEGRAM_BOT_TOKEN, previewTo, post, { silent: tier === "minor" });
 }
 
 const MAX_BLOG_POSTS_PER_TICK = 5;
@@ -612,7 +633,12 @@ async function watchYouTubeChannel(
 
 // Test hook /run?source=youtube&version=<title or video-id substring>, never
 // touches KV. Reports whether the Shorts probe would drop the video.
-async function forceYouTubeVideo(env: Env, query: string, dryRun: boolean): Promise<string> {
+async function forceYouTubeVideo(
+  env: Env,
+  query: string,
+  dryRun: boolean,
+  previewTo?: string,
+): Promise<string> {
   const q = query.toLowerCase();
   for (const channel of YOUTUBE_CHANNELS) {
     const video = (await fetchVideoFeed(channel.channelId)).find(
@@ -622,6 +648,10 @@ async function forceYouTubeVideo(env: Env, query: string, dryRun: boolean): Prom
     const short = await isShort(video.videoId);
     const digest = await digestVideo(env.ANTHROPIC_API_KEY, env.RELEASES, channel.label, video);
     const post = formatVideoPost(channel.label, video, digest.bullets);
+    if (previewTo) {
+      await sendPreviewTiered(env, post, digest.tier, previewTo);
+      return `youtube_${channel.key}: previewed "${video.title}" [${digest.tier}] short=${short}`;
+    }
     if (dryRun) {
       return `youtube_${channel.key}: "${video.title}" tier=${digest.tier} short=${short} (dry)\n---\n${post}`;
     }
@@ -736,12 +766,25 @@ async function watchAnthropicStatus(env: Env, dryRun: boolean): Promise<string> 
 
 // Test hook /run?source=status&version=<name or id substring>: renders one
 // incident's card (dry: at every stage of its timeline), never touches KV.
-async function forceStatusIncident(env: Env, query: string, dryRun: boolean): Promise<string> {
+async function forceStatusIncident(
+  env: Env,
+  query: string,
+  dryRun: boolean,
+  previewTo?: string,
+): Promise<string> {
   const q = query.toLowerCase();
   const incident = (await fetchIncidents()).find(
     (i) => i.name.toLowerCase().includes(q) || i.id === query,
   );
   if (!incident) return `status: no incident matching ${query}`;
+  if (previewTo) {
+    // The card comes from the status bot, the same sender the channel sees.
+    if (!env.TELEGRAM_STATUS_BOT_TOKEN) return "status: no bot token configured";
+    await sendMessage(env.TELEGRAM_STATUS_BOT_TOKEN, previewTo, formatIncidentCard(incident), {
+      silent: true,
+    });
+    return `status: previewed card for ${incident.name}`;
+  }
   if (dryRun) {
     const stages = incident.updates.map((_, n) =>
       formatIncidentCard({ ...incident, resolved: false, updates: incident.updates.slice(0, n + 1) }),
@@ -760,12 +803,21 @@ async function forceStatusIncident(env: Env, query: string, dryRun: boolean): Pr
 
 // Test hook /run?source=blog&version=<url substring>: digests and (outside
 // dry) posts one blog entry, never touches KV.
-async function forceBlogEntry(env: Env, query: string, dryRun: boolean): Promise<string> {
+async function forceBlogEntry(
+  env: Env,
+  query: string,
+  dryRun: boolean,
+  previewTo?: string,
+): Promise<string> {
   const q = query.toLowerCase();
   const entry = (await fetchAllBlogEntries()).find((e) => e.url.toLowerCase().includes(q));
   if (!entry) return `blog: no post matching ${query}`;
   const digest = await digestBlogPost(env.ANTHROPIC_API_KEY, env.RELEASES, entry);
   const post = formatBlogPost(entry, digest);
+  if (previewTo) {
+    await sendPreviewTiered(env, post, digest.tier, previewTo);
+    return `blog: previewed ${entry.url} [${digest.tier}]`;
+  }
   if (dryRun) return `blog: ${entry.url} tier=${digest.tier} (dry)\n---\n${post}`;
   if (!env.TELEGRAM_ANTHROPIC_BLOG_CHAT_ID) return "blog: no chat configured";
   await sendTiered(env, env.TELEGRAM_ANTHROPIC_BLOG_CHAT_ID, post, digest.tier);
@@ -773,12 +825,22 @@ async function forceBlogEntry(env: Env, query: string, dryRun: boolean): Promise
 }
 
 // Test hook /run?source=openai_blog&version=<title substring>, never touches KV.
-async function forceOpenAiBlogItem(env: Env, query: string, dryRun: boolean): Promise<string> {
+async function forceOpenAiBlogItem(
+  env: Env,
+  query: string,
+  dryRun: boolean,
+  previewTo?: string,
+): Promise<string> {
   const q = query.toLowerCase();
   const item = (await fetchOpenAiNews()).find(
     (i) => i.title.toLowerCase().includes(q) || i.guid.includes(query),
   );
   if (!item) return `openai_blog: no item matching ${query}`;
+  if (previewTo) {
+    const { post, tier, via } = await buildOpenAiBlogPost(env, item);
+    await sendPreviewTiered(env, post, tier, previewTo);
+    return `openai_blog: previewed "${item.title}" [${tier}, ${via}]`;
+  }
   if (dryRun) {
     // A force-post deliberately ignores the filter; the dry run still reports
     // what the filter would have said, which is the only view we have of
@@ -798,12 +860,21 @@ async function forceOpenAiBlogItem(env: Env, query: string, dryRun: boolean): Pr
 }
 
 // Test hook /run?source=openai_dev&version=<title substring>, never touches KV.
-async function forceDevPost(env: Env, query: string, dryRun: boolean): Promise<string> {
+async function forceDevPost(
+  env: Env,
+  query: string,
+  dryRun: boolean,
+  previewTo?: string,
+): Promise<string> {
   const q = query.toLowerCase();
   const post = (await fetchDevPosts()).find((p) => p.title.toLowerCase().includes(q));
   if (!post) return `openai_dev: no post matching ${query}`;
   const { text, tier, body } = await buildDevPost(env, post);
   if (!text) return `openai_dev: could not read ${post.mdUrl}`;
+  if (previewTo) {
+    await sendPreviewTiered(env, body, tier, previewTo);
+    return `openai_dev: previewed "${post.title}" [${tier}]`;
+  }
   if (dryRun) return `openai_dev: "${post.title}" tier=${tier} (dry)\n---\n${body}`;
   if (!env.TELEGRAM_OPENAI_BLOG_CHAT_ID) return "openai_dev: no chat configured";
   await sendTiered(env, env.TELEGRAM_OPENAI_BLOG_CHAT_ID, body, tier);
@@ -812,13 +883,22 @@ async function forceDevPost(env: Env, query: string, dryRun: boolean): Promise<s
 
 // Force-announce one OpenAI model (test hook /run?source=openai&version=<id>),
 // never touches KV. Shows which article the id matched, if any.
-async function forceOpenAiModel(env: Env, id: string, dryRun: boolean): Promise<string> {
+async function forceOpenAiModel(
+  env: Env,
+  id: string,
+  dryRun: boolean,
+  previewTo?: string,
+): Promise<string> {
   if (!env.OPENAI_API_KEY) return "openai_models: no api key configured";
   const model = (await listOpenAiModels(env.OPENAI_API_KEY)).find((m) => m.id === id) ?? {
     id,
     created: 0,
   };
   const { post, via } = await buildOpenAiModelsPost(env, [model]);
+  if (previewTo) {
+    await sendMessage(env.TELEGRAM_BOT_TOKEN, previewTo, post);
+    return `openai_models: previewed ${id} [${via}]`;
+  }
   if (dryRun) {
     console.log(`DRY_RUN: would post OpenAI model announcement:\n${post}`);
     return `openai_models: would post ${id} [${via}] (dry)\n---\n${post}`;
@@ -835,7 +915,12 @@ async function forceOpenAiModel(env: Env, id: string, dryRun: boolean): Promise<
 }
 
 // Force-announce one model (test hook /run?source=models&version=<id>), never touches KV.
-async function forceModelAnnouncement(env: Env, id: string, dryRun: boolean): Promise<string> {
+async function forceModelAnnouncement(
+  env: Env,
+  id: string,
+  dryRun: boolean,
+  previewTo?: string,
+): Promise<string> {
   const model = (await listModels(env.ANTHROPIC_API_KEY)).find((m) => m.id === id) ?? {
     id,
     displayName: id,
@@ -844,6 +929,10 @@ async function forceModelAnnouncement(env: Env, id: string, dryRun: boolean): Pr
   const announcements = await buildAnnouncements(env.ANTHROPIC_API_KEY, env.RELEASES, [model]);
   const post = formatNewModelsPost(announcements);
   const photoUrls = announcements.flatMap((a) => a.press?.photos.map((p) => p.url) ?? []);
+  if (previewTo) {
+    await postModelsMessage(env, post, announcements, previewTo);
+    return `models: previewed ${id} (photos: ${photoUrls.join(", ") || "none"})`;
+  }
   if (dryRun) {
     console.log(`DRY_RUN: would post model announcement:\n${post}`);
     return `models: would post ${id} (dry, photos: ${photoUrls.join(", ") || "none"})\n---\n${post}`;
@@ -855,25 +944,34 @@ async function forceModelAnnouncement(env: Env, id: string, dryRun: boolean): Pr
 
 export async function runPipeline(
   env: Env,
-  opts: { forceVersion?: string; dryOverride?: boolean; source?: string } = {},
+  opts: { forceVersion?: string; dryOverride?: boolean; source?: string; preview?: boolean } = {},
 ): Promise<string> {
   const dryRun = opts.dryOverride ?? env.DRY_RUN === "1";
   const sources = feedSources(env);
 
   if (opts.forceVersion) {
-    if (opts.source === "models") return forceModelAnnouncement(env, opts.forceVersion, dryRun);
-    if (opts.source === "openai") return forceOpenAiModel(env, opts.forceVersion, dryRun);
-    if (opts.source === "blog") return forceBlogEntry(env, opts.forceVersion, dryRun);
-    if (opts.source === "openai_blog") return forceOpenAiBlogItem(env, opts.forceVersion, dryRun);
-    if (opts.source === "openai_dev") return forceDevPost(env, opts.forceVersion, dryRun);
-    if (opts.source === "youtube") return forceYouTubeVideo(env, opts.forceVersion, dryRun);
-    if (opts.source === "status") return forceStatusIncident(env, opts.forceVersion, dryRun);
+    const previewTo = opts.preview ? env.TELEGRAM_OWNER_CHAT_ID : undefined;
+    if (opts.preview && !previewTo) return "preview: TELEGRAM_OWNER_CHAT_ID not configured";
+    if (opts.source === "models")
+      return forceModelAnnouncement(env, opts.forceVersion, dryRun, previewTo);
+    if (opts.source === "openai")
+      return forceOpenAiModel(env, opts.forceVersion, dryRun, previewTo);
+    if (opts.source === "blog") return forceBlogEntry(env, opts.forceVersion, dryRun, previewTo);
+    if (opts.source === "openai_blog")
+      return forceOpenAiBlogItem(env, opts.forceVersion, dryRun, previewTo);
+    if (opts.source === "openai_dev")
+      return forceDevPost(env, opts.forceVersion, dryRun, previewTo);
+    if (opts.source === "youtube")
+      return forceYouTubeVideo(env, opts.forceVersion, dryRun, previewTo);
+    if (opts.source === "status")
+      return forceStatusIncident(env, opts.forceVersion, dryRun, previewTo);
     const source = sources.find((s) => s.key === (opts.source ?? "claude"));
     if (!source) return `unknown source ${opts.source}`;
-    if (!source.chatId && !dryRun) return `${source.key}: no chat configured`;
+    if (!source.chatId && !dryRun && !previewTo) return `${source.key}: no chat configured`;
     const release = (await source.fetch()).find((r) => r.version === opts.forceVersion);
     if (!release) return `version ${opts.forceVersion} not found for ${source.key}`;
-    await postRelease(env, source, release, dryRun);
+    await postRelease(env, source, release, dryRun, previewTo);
+    if (previewTo) return `previewed ${source.key} ${release.version}`;
     return `force-posted ${source.key} ${release.version}${dryRun ? " (dry)" : ""}`;
   }
 
@@ -1020,6 +1118,10 @@ export default {
     const dryOverride = url.searchParams.has("dry")
       ? url.searchParams.get("dry") === "1"
       : undefined;
+    const preview = url.searchParams.get("preview") === "1";
+    if (preview && !url.searchParams.get("version")) {
+      return new Response("preview needs source= and version=\n", { status: 400 });
+    }
     const only = url.searchParams.get("only");
     if (only && only !== "status") return new Response(`unknown only=${only}\n`, { status: 400 });
     const result = only
@@ -1028,6 +1130,7 @@ export default {
           forceVersion: url.searchParams.get("version") ?? undefined,
           source: url.searchParams.get("source") ?? undefined,
           dryOverride,
+          preview,
         });
     return new Response(result + "\n");
   },

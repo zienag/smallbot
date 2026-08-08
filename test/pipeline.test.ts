@@ -48,6 +48,18 @@ describe("release feed", () => {
     expect(kv.store.get("last_posted_version")).toBe("1.0.2");
   });
 
+  it("preview delivers the force-post to the owner's DM and leaves the cursor alone", async () => {
+    const kv = fakeKv({ last_posted_version: "1.0.0" });
+    const env = { ...feedEnv(kv), TELEGRAM_OWNER_CHAT_ID: "4242" };
+
+    const result = await runPipeline(env as unknown as Env, { forceVersion: "1.0.1", preview: true });
+
+    expect(result).toBe("previewed claude 1.0.1");
+    expect(mocks.sendMessage).toHaveBeenCalledTimes(1);
+    expect(mocks.sendMessage.mock.calls[0][1]).toBe("4242");
+    expect(kv.store.get("last_posted_version")).toBe("1.0.0");
+  });
+
   it("on first run posts only the newest published version", async () => {
     const kv = fakeKv();
     const result = await runPipeline(feedEnv(kv));
