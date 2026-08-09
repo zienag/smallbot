@@ -11,7 +11,7 @@ HTML parse mode; header is bold with the version linked to the changelog anchor 
 
 ## Changing how posts look
 
-A change to how posts *look* ships only after the owner has seen it: hand-send drafts via the bot API (python multipart, no LLM calls, `[TEST X]` markers, delete after), then deploy the approved variant.
+A change to how posts *look* ships only after the owner has seen it: `/run?source=…&version=…&preview=1` sends the exact rendered message to his DM (docs/operations.md) — iterate there, then deploy the approved variant. Remember the ~1-minute stale-serve window after a deploy: the first preview may still come from the old version.
 
 Cleanup has limits, so don't plan on it: the Bipozavr bot cannot delete its own message after 48h or a service message at all, and it can't read channel history — a message id comes from the public web view, where `t.me/s/<channel>` carries `data-post="<channel>/<id>"`. The `@alfred_service_account` user account (dev-creds skill) is the way around both: as a channel admin it deletes old posts and reads history.
 

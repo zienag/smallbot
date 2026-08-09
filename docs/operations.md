@@ -66,4 +66,6 @@ To re-trigger an already-seen model/news item for a real test:
 npx wrangler kv key get/put --remote --namespace-id 2254c70148884faa8d27f6fd73e08e81 <key>
 ```
 
-Remove the entry from the relevant seen-set (`known_models`, `openai_known_models`, `openai_blog_seen`, …). `--remote` is mandatory — without it wrangler hits an empty local simulator ("Value not found"). Prefer the `/run?source=…&version=…&dry=1` hooks — they render the same post without touching KV or the channel.
+Remove the entry from the relevant seen-set. `--remote` is mandatory — without it wrangler hits an empty local simulator ("Value not found"). Prefer the `/run?source=…&version=…&dry=1` hooks — they render the same post without touching KV or the channel.
+
+The keys: `last_posted_version` (claude), `codex_last_posted_version`, `known_models` / `openai_known_models` (JSON id arrays), `openai_blog_seen` (JSON guid array), `anthropic_blog_seen` / `openai_dev_blog_seen` (JSON url arrays), `status_incidents` (JSON incident-id → `{messageId, postedUpdates}`), `status_subs:<incident id>` (JSON chat-id arrays), `youtube_seen:<channel key>` (JSON video-id arrays), `resolved_model` / `resolved_model_sonnet` (24h TTL caches).
