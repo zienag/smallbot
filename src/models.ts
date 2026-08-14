@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
-import { BOT_UA, articleText, decodeEntities, pageTitle } from "./html";
+import { decodeHTML } from "entities";
+import { BOT_UA, articleText, pageTitle } from "./html";
 import { structuredFromPrompt, summaryFromPrompt } from "./summarize";
 import { escapeHtml, formatInline } from "./telegram";
 
@@ -115,7 +116,7 @@ export function articleImages(page: string): ArticleImage[] {
     if (attrs.includes("heroImage")) continue;
     const src = attrs.match(/srcSet="([^"\s]+)/i)?.[1] ?? attrs.match(/src="([^"]+)"/)?.[1];
     if (!src) continue;
-    const url0 = decodeEntities(src);
+    const url0 = decodeHTML(src);
     const url = url0.startsWith("/") ? `https://www.anthropic.com${url0}` : url0;
     if (seen.has(url)) continue;
     seen.add(url);

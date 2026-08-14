@@ -1,4 +1,5 @@
-import { decodeEntities, htmlToText } from "./html";
+import { decodeHTML } from "entities";
+import { htmlToText } from "./html";
 import { compareVersions } from "./version";
 
 // The repo's CHANGELOG.md is a stub ("see releases"); the real source is GitHub
@@ -26,7 +27,7 @@ export function parseReleasesAtom(xml: string): CodexRelease[] {
     if (!tag || !url || content === undefined) continue;
     const version = tag.match(/^rust-v(\d+\.\d+\.\d+)$/)?.[1];
     if (!version) continue;
-    releases.push({ version, url, notes: htmlToText(decodeEntities(content)) });
+    releases.push({ version, url, notes: htmlToText(decodeHTML(content)) });
   }
   return releases.sort((a, b) => compareVersions(b.version, a.version));
 }

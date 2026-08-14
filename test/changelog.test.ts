@@ -280,6 +280,14 @@ describe("articleText / pageTitle", () => {
     expect(pageTitle(page)).toBe("Introducing X");
     expect(articleText("<html><body>no article</body></html>")).toBeNull();
   });
+
+  it("decodes hex, decimal and named character references", () => {
+    const page =
+      "<html><head><title>How Claude&#x27;s watermark works \\ Anthropic</title></head></html>";
+    expect(pageTitle(page)).toBe("How Claude's watermark works");
+    expect(pageTitle("<title>a&#39;b &#8212; c &mdash; d</title>")).toBe("a'b — c — d");
+    expect(pageTitle("<title>&amp;#x27; stays literal</title>")).toBe("&#x27; stays literal");
+  });
 });
 
 describe("changelogAnchorUrl", () => {
