@@ -1,4 +1,4 @@
-import { escapeHtml, formatInline } from "./telegram";
+import { buildArticlePost, bulletList } from "./blogs";
 
 /**
  * The developer half of OpenAI — docs, Codex and API posts — lives on Vercel
@@ -9,6 +9,9 @@ import { escapeHtml, formatInline } from "./telegram";
  */
 export const OPENAI_DEV_INDEX_URL = "https://developers.openai.com/blog/llms.txt";
 export const OPENAI_DEV_SEEN_KEY = "openai_dev_blog_seen";
+
+/** Signs the post footer and names the source in the digest prompt. */
+export const OPENAI_DEV_SOURCE = "OpenAI Developers";
 
 export interface DevPost {
   title: string;
@@ -43,8 +46,16 @@ export async function fetchDevPostText(post: DevPost): Promise<string | null> {
   return (await res.text()).replace(BOILERPLATE, "").trim();
 }
 
-export function formatDevPost(post: DevPost, bullets: string[]): string {
-  const head = `<b>OpenAI Developers: <a href="${post.url}">${escapeHtml(post.title)}</a></b>`;
-  if (bullets.length === 0) return head;
-  return `${head}\n\n${bullets.map((b) => `• ${formatInline(b)}`).join("\n")}`;
+export function formatDevPost(
+  post: DevPost,
+  bullets: string[],
+  minutes: number | null,
+): string {
+  return buildArticlePost({
+    url: post.url,
+    title: post.title,
+    body: bulletList(bullets),
+    source: OPENAI_DEV_SOURCE,
+    minutes,
+  });
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BLOG_INDEXES, formatBlogPost, parseIndexLinks } from "../src/blogs";
+import { BLOG_INDEXES, formatBlogPost, parseIndexLinks, readMinutes } from "../src/blogs";
 import { articleText } from "../src/html";
 
 const claudeBlog = BLOG_INDEXES[0];
@@ -26,21 +26,47 @@ describe("parseIndexLinks", () => {
 describe("formatBlogPost", () => {
   const entry = { url: "https://claude.com/blog/a-post", source: "Claude Blog" };
 
-  it("renders a linked header and inline-formatted bullets", () => {
+  it("renders a linked title, inline-formatted bullets and the source footer", () => {
     const post = formatBlogPost(entry, {
       title: "A <new> post",
       tier: "normal",
       bullets: ["Adds `--flag` support", "2x faster"],
+      minutes: 5,
     });
     expect(post).toBe(
-      '<b>Claude Blog: <a href="https://claude.com/blog/a-post">A &lt;new&gt; post</a></b>\n\n' +
-        "• Adds <code>--flag</code> support\n• 2x faster",
+      '<b><a href="https://claude.com/blog/a-post">A &lt;new&gt; post</a></b>\n\n' +
+        "• Adds <code>--flag</code> support\n• 2x faster\n\n" +
+        "<i>Claude Blog · 5 min read</i>",
     );
   });
 
-  it("degrades to header only without bullets", () => {
-    const post = formatBlogPost(entry, { title: "T", tier: "minor", bullets: [] });
-    expect(post).toBe('<b>Claude Blog: <a href="https://claude.com/blog/a-post">T</a></b>');
+  it("drops the read time when the article text never arrived", () => {
+    const post = formatBlogPost(entry, {
+      title: "T",
+      tier: "minor",
+      bullets: ["One point"],
+      minutes: null,
+    });
+    expect(post).toBe(
+      '<b><a href="https://claude.com/blog/a-post">T</a></b>\n\n' +
+        "• One point\n\n<i>Claude Blog</i>",
+    );
+  });
+
+  it("degrades to title and footer without bullets", () => {
+    const post = formatBlogPost(entry, { title: "T", tier: "minor", bullets: [], minutes: 1 });
+    expect(post).toBe(
+      '<b><a href="https://claude.com/blog/a-post">T</a></b>\n\n<i>Claude Blog · 1 min read</i>',
+    );
+  });
+});
+
+describe("readMinutes", () => {
+  it("rounds to whole minutes with a floor of one", () => {
+    expect(readMinutes(null)).toBeNull();
+    expect(readMinutes("   ")).toBeNull();
+    expect(readMinutes("one two three")).toBe(1);
+    expect(readMinutes(Array(2128).fill("word").join(" "))).toBe(10);
   });
 });
 

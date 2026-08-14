@@ -435,7 +435,7 @@ async function watchAnthropicBlogs(env: Env, dryRun: boolean): Promise<string> {
 async function digestOpenAiArticle(
   env: Env,
   item: NewsItem,
-): Promise<{ bullets: string[]; tier: Tier; via: string }> {
+): Promise<{ bullets: string[]; tier: Tier; minutes: number | null; via: string }> {
   const markdown = await fetchPageMarkdown(env.BROWSER, item.link);
   if (markdown) {
     const digest = await digestArticle(
@@ -460,16 +460,16 @@ async function digestOpenAiArticle(
     console.log(`openai web_fetch digest failed for ${item.link}: ${err}`);
   }
   const tier = await classifyTier(env.ANTHROPIC_API_KEY, env.RELEASES, item);
-  return { bullets: [], tier, via: "feed only" };
+  return { bullets: [], tier, minutes: null, via: "feed only" };
 }
 
 async function buildOpenAiBlogPost(
   env: Env,
   item: NewsItem,
 ): Promise<{ post: string; tier: Tier; via: string }> {
-  const { bullets, tier, via } = await digestOpenAiArticle(env, item);
+  const { bullets, tier, minutes, via } = await digestOpenAiArticle(env, item);
   // No bullets falls back to the feed sentence inside the formatter.
-  return { post: formatOpenAiBlogPost(item, bullets), tier, via };
+  return { post: formatOpenAiBlogPost(item, bullets, minutes), tier, via };
 }
 
 // Bounds the digests one tick can pay for; the tail catches up next tick.
@@ -578,7 +578,11 @@ async function buildDevPost(
     post.title,
     text,
   );
-  return { text: true, tier: digest.tier, body: formatDevPost(post, digest.bullets) };
+  return {
+    text: true,
+    tier: digest.tier,
+    body: formatDevPost(post, digest.bullets, digest.minutes),
+  };
 }
 
 // Each company's videos land in its blog channel, next to its written posts.

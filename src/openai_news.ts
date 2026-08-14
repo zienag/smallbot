@@ -1,7 +1,10 @@
-import { TIER_CRITERIA, type Tier } from "./blogs";
+import { TIER_CRITERIA, type Tier, buildArticlePost, bulletList } from "./blogs";
 import { type BrowserRun, fetchPageMarkdown } from "./browser";
 import { structuredFromPrompt } from "./summarize";
-import { escapeHtml, formatInline } from "./telegram";
+import { escapeHtml } from "./telegram";
+
+/** Signs the post footer and names the source in the digest prompt. */
+export const OPENAI_SOURCE = "OpenAI";
 
 // The RSS is the one thing on openai.com a worker can always fetch; article
 // pages answer 403 for hours at a stretch, so their text comes from the model's
@@ -208,12 +211,27 @@ export async function classifyTier(
 }
 
 export function formatOpenAiModelPost(item: NewsItem): string {
-  return `<b>OpenAI: <a href="${item.link}">${escapeHtml(item.title)}</a></b>\n\n${escapeHtml(item.description)}`;
+  return buildArticlePost({
+    url: item.link,
+    title: item.title,
+    body: escapeHtml(item.description),
+    source: OPENAI_SOURCE,
+    minutes: null,
+  });
 }
 
 /** Same shape as the Anthropic blog post; falls back to the feed sentence. */
-export function formatOpenAiBlogPost(item: NewsItem, bullets: string[]): string {
+export function formatOpenAiBlogPost(
+  item: NewsItem,
+  bullets: string[],
+  minutes: number | null,
+): string {
   if (bullets.length === 0) return formatOpenAiModelPost(item);
-  const head = `<b>OpenAI: <a href="${item.link}">${escapeHtml(item.title)}</a></b>`;
-  return `${head}\n\n${bullets.map((b) => `• ${formatInline(b)}`).join("\n")}`;
+  return buildArticlePost({
+    url: item.link,
+    title: item.title,
+    body: bulletList(bullets),
+    source: OPENAI_SOURCE,
+    minutes,
+  });
 }

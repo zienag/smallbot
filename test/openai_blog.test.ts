@@ -109,15 +109,15 @@ describe("parseRss", () => {
 });
 
 describe("formatOpenAiBlogPost", () => {
-  it("renders a linked header and inline-formatted bullets", () => {
-    expect(formatOpenAiBlogPost(ITEM, ["Ships `gpt-5.5-codex`", "2x cheaper"])).toBe(
-      '<b>OpenAI: <a href="https://openai.com/index/a-post">A &lt;new&gt; post</a></b>\n\n' +
-        "• Ships <code>gpt-5.5-codex</code>\n• 2x cheaper",
+  it("renders a linked title, inline-formatted bullets and the source footer", () => {
+    expect(formatOpenAiBlogPost(ITEM, ["Ships `gpt-5.5-codex`", "2x cheaper"], 7)).toBe(
+      '<b><a href="https://openai.com/index/a-post">A &lt;new&gt; post</a></b>\n\n' +
+        "• Ships <code>gpt-5.5-codex</code>\n• 2x cheaper\n\n<i>OpenAI · 7 min read</i>",
     );
   });
 
   it("falls back to the feed sentence when the article could not be read", () => {
-    expect(formatOpenAiBlogPost(ITEM, [])).toBe(formatOpenAiModelPost(ITEM));
+    expect(formatOpenAiBlogPost(ITEM, [], null)).toBe(formatOpenAiModelPost(ITEM));
   });
 });
 

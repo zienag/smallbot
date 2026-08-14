@@ -266,7 +266,8 @@ describe("formatOpenAiModelPost", () => {
       category: "Product",
     });
     expect(post).toBe(
-      '<b>OpenAI: <a href="https://openai.com/index/introducing-gpt-6">Introducing GPT-6 &lt;beta&gt;</a></b>\n\nBigger &amp; better.',
+      '<b><a href="https://openai.com/index/introducing-gpt-6">Introducing GPT-6 &lt;beta&gt;</a></b>' +
+        "\n\nBigger &amp; better.\n\n<i>OpenAI</i>",
     );
   });
 });

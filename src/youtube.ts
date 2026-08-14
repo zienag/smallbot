@@ -128,9 +128,9 @@ export async function digestVideo(
 }
 
 /**
- * No source label, unlike the blog posts: the title leads and the link
- * preview card (enabled only for these posts) already says it is YouTube
- * and names the channel. Owner-approved shape.
+ * No source line, unlike the blog posts: the link preview card (enabled only
+ * for these posts) already says it is YouTube and names the channel.
+ * Owner-approved shape.
  */
 export function formatVideoPost(video: Video, bullets: string[]): string {
   const head = `<b><a href="${video.url}">${escapeHtml(video.title)}</a></b>`;

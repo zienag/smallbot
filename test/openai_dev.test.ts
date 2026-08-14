@@ -29,17 +29,18 @@ describe("formatDevPost", () => {
     url: "https://developers.openai.com/blog/x",
   };
 
-  it("renders a linked header and inline-formatted bullets", () => {
-    expect(formatDevPost(post, ["Adds `--strict`"])).toBe(
-      '<b>OpenAI Developers: <a href="https://developers.openai.com/blog/x">' +
-        "Custom &lt;rules&gt; for Codex</a></b>\n\n• Adds <code>--strict</code>",
+  it("renders a linked title, inline-formatted bullets and the source footer", () => {
+    expect(formatDevPost(post, ["Adds `--strict`"], 3)).toBe(
+      '<b><a href="https://developers.openai.com/blog/x">' +
+        "Custom &lt;rules&gt; for Codex</a></b>\n\n• Adds <code>--strict</code>\n\n" +
+        "<i>OpenAI Developers · 3 min read</i>",
     );
   });
 
-  it("degrades to header only without bullets", () => {
-    expect(formatDevPost(post, [])).toBe(
-      '<b>OpenAI Developers: <a href="https://developers.openai.com/blog/x">' +
-        "Custom &lt;rules&gt; for Codex</a></b>",
+  it("degrades to title and footer without bullets", () => {
+    expect(formatDevPost(post, [], 3)).toBe(
+      '<b><a href="https://developers.openai.com/blog/x">' +
+        "Custom &lt;rules&gt; for Codex</a></b>\n\n<i>OpenAI Developers · 3 min read</i>",
     );
   });
 });

@@ -10,7 +10,7 @@ const ARTICLE_TEXT_LIMIT = 12000;
 // An index only lists recent posts, but at one tick per 15 minutes nothing
 // rotates out unseen. Every source posts to the same channel.
 export interface BlogIndex {
-  source: string; // post header prefix
+  source: string; // signs the post footer
   indexUrl: string;
   base: string;
   hrefPrefix: string; // post links on the index page are base-relative under this
@@ -86,6 +86,17 @@ export interface BlogDigest {
   title: string;
   tier: Tier;
   bullets: string[];
+  minutes: number | null;
+}
+
+/** Words per minute of prose, the figure the read-time counters everyone knows use. */
+const WPM = 220;
+
+/** Read time in whole minutes, floor 1; null when the article text never reached us. */
+export function readMinutes(text: string | null): number | null {
+  if (!text) return null;
+  const words = text.trim().split(/\s+/).filter(Boolean).length;
+  return words === 0 ? null : Math.max(1, Math.round(words / WPM));
 }
 
 // Split so the two prompts differ only in where the article comes from.
@@ -141,7 +152,7 @@ export async function digestArticleByUrl(
   source: string,
   title: string,
   url: string,
-): Promise<{ tier: Tier; bullets: string[] }> {
+): Promise<{ tier: Tier; bullets: string[]; minutes: number | null }> {
   const digest = await structuredFromPrompt<{ tier: Tier; bullets: string[] }>(
     apiKey,
     kv,
@@ -150,7 +161,8 @@ export async function digestArticleByUrl(
     "opus",
     true,
   );
-  return { tier: digest.tier, bullets: digest.bullets.slice(0, 4) };
+  // The model read the page, we never saw it: no word count, so no read time.
+  return { tier: digest.tier, bullets: digest.bullets.slice(0, 4), minutes: null };
 }
 
 /** Shared with the OpenAI blog watch, which gets its article text elsewhere. */
@@ -160,14 +172,15 @@ export async function digestArticle(
   source: string,
   title: string,
   text: string,
-): Promise<{ tier: Tier; bullets: string[] }> {
+): Promise<{ tier: Tier; bullets: string[]; minutes: number | null }> {
   const digest = await structuredFromPrompt<{ tier: Tier; bullets: string[] }>(
     apiKey,
     kv,
     DIGEST_PROMPT(source, title, text.slice(0, ARTICLE_TEXT_LIMIT)),
     DIGEST_SCHEMA,
   );
-  return { tier: digest.tier, bullets: digest.bullets.slice(0, 4) };
+  // Counted on the whole article, not the slice the prompt gets.
+  return { tier: digest.tier, bullets: digest.bullets.slice(0, 4), minutes: readMinutes(text) };
 }
 
 export async function digestBlogPost(
@@ -189,8 +202,34 @@ export async function digestBlogPost(
   return { title, ...digest };
 }
 
+export function bulletList(bullets: string[]): string {
+  return bullets.map((b) => `• ${formatInline(b)}`).join("\n");
+}
+
+/**
+ * The shape every blog channel post shares: the title leads, the source signs
+ * off at the bottom. Telegram's HTML has no colour, so the footer is italic —
+ * the quietest register the Bot API offers.
+ */
+export function buildArticlePost(article: {
+  url: string;
+  title: string;
+  body: string;
+  source: string;
+  minutes: number | null;
+}): string {
+  const head = `<b><a href="${article.url}">${escapeHtml(article.title)}</a></b>`;
+  const read = article.minutes === null ? "" : ` · ${article.minutes} min read`;
+  const footer = `<i>${escapeHtml(article.source)}${read}</i>`;
+  return [head, article.body, footer].filter(Boolean).join("\n\n");
+}
+
 export function formatBlogPost(entry: BlogEntry, digest: BlogDigest): string {
-  const head = `<b>${escapeHtml(entry.source)}: <a href="${entry.url}">${escapeHtml(digest.title)}</a></b>`;
-  if (digest.bullets.length === 0) return head;
-  return `${head}\n\n${digest.bullets.map((b) => `• ${formatInline(b)}`).join("\n")}`;
+  return buildArticlePost({
+    url: entry.url,
+    title: digest.title,
+    body: bulletList(digest.bullets),
+    source: entry.source,
+    minutes: digest.minutes,
+  });
 }
