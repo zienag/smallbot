@@ -11,6 +11,14 @@ export const OPENAI_SOURCE = "OpenAI";
 // own fetch (see digestArticleByUrl).
 export const OPENAI_RSS_URL = "https://openai.com/news/rss.xml";
 export const OPENAI_BLOG_SEEN_KEY = "openai_blog_seen";
+/**
+ * guid → when the news list last said "not listed". Unlisted items stay out of
+ * the seen-set so a blocked list decides nothing for good, but asking the list
+ * about the same items every tick for a fortnight is exactly the request rate
+ * that arms openai.com's challenge — a verdict holds for `UNLISTED_RECHECK_MS`.
+ */
+export const OPENAI_UNLISTED_KEY = "openai_unlisted";
+export const UNLISTED_RECHECK_MS = 6 * 60 * 60 * 1000;
 
 export interface NewsItem {
   title: string;
@@ -21,16 +29,23 @@ export interface NewsItem {
   category: string; // "" on the pages the news index does not list
 }
 
+const RSS_FIELDS = ["title", "link", "description", "guid", "pubDate", "category"] as const;
+
+// Compiled once: the feed carries its whole history, over a thousand items,
+// and compiling six patterns per item was most of the parse.
+const RSS_FIELD_RE = Object.fromEntries(
+  RSS_FIELDS.map((name) => [
+    name,
+    new RegExp(`<${name}[^>]*>(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?</${name}>`),
+  ]),
+) as Record<(typeof RSS_FIELDS)[number], RegExp>;
+
 /** Feed order: newest first. The feed contains the entire history. */
 export function parseRss(xml: string): NewsItem[] {
   const items: NewsItem[] = [];
   for (const [, item] of xml.matchAll(/<item>([\s\S]*?)<\/item>/g)) {
-    const field = (name: string) => {
-      const m = item.match(
-        new RegExp(`<${name}[^>]*>(?:<!\\[CDATA\\[)?([\\s\\S]*?)(?:\\]\\]>)?</${name}>`),
-      );
-      return m?.[1].trim() ?? "";
-    };
+    const field = (name: (typeof RSS_FIELDS)[number]) =>
+      item.match(RSS_FIELD_RE[name])?.[1].trim() ?? "";
     const guid = field("guid") || field("link");
     if (!guid) continue;
     const published = Date.parse(field("pubDate"));

@@ -1,3 +1,5 @@
+import { type Validators, conditionalFetch } from "./conditional";
+
 export const CHANGELOG_URL =
   "https://raw.githubusercontent.com/anthropics/claude-code/main/CHANGELOG.md";
 
@@ -22,8 +24,10 @@ export function parseChangelog(md: string): Release[] {
   return releases;
 }
 
-export async function fetchChangelog(): Promise<Release[]> {
-  const res = await fetch(CHANGELOG_URL);
+/** Null: unchanged since the last fully processed read (a 304). */
+export async function fetchChangelog(validators?: Validators): Promise<Release[] | null> {
+  const res = await conditionalFetch(CHANGELOG_URL, validators);
+  if (!res) return null;
   if (!res.ok) throw new Error(`changelog fetch failed: ${res.status}`);
   return parseChangelog(await res.text());
 }

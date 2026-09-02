@@ -1,3 +1,5 @@
+import { decodeHTML } from "entities";
+import { type Validators, conditionalFetch } from "./conditional";
 import { BOT_UA, articleText, pageTitle } from "./html";
 import { structuredFromPrompt } from "./summarize";
 import { escapeHtml, formatInline } from "./telegram";
@@ -40,30 +42,56 @@ export const BLOG_INDEXES: BlogIndex[] = [
 export interface BlogEntry {
   url: string;
   source: string;
+  published?: number; // epoch ms from the card's <time>, when the index dates it
 }
 
-/** Post links from an index page, in page order (newest first), deduped. */
+/** Same window as the other watches: a dated card older than this is not news. */
+export const MAX_BLOG_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+
+/** Undated entries pass — the prefix indexes list only recent posts. */
+export function isRecentEntry(entry: BlogEntry, now: number): boolean {
+  return entry.published === undefined || now - entry.published <= MAX_BLOG_AGE_MS;
+}
+
+/**
+ * Post links from an index page, in page order (newest first), deduped. A post
+ * is a link under the index's prefix, or a card the index dates — an anchor
+ * with a `<time>` inside — wherever it points: anthropic.com/news put the
+ * Fable 5.1 launch in its featured card as /claude-fable-and-mythos-5-1, and
+ * the prefix alone dropped it (2026-09-01). Only that index dates its cards;
+ * the other two carry no `<time>` at all and rely on the prefix.
+ */
 export function parseIndexLinks(index: BlogIndex, html: string): BlogEntry[] {
   const out: BlogEntry[] = [];
   const seen = new Set<string>();
-  for (const [, href] of html.matchAll(/href="(\/[^"#?]+)"/g)) {
-    if (!href.startsWith(index.hrefPrefix)) continue;
+  for (const [, href, body] of html.matchAll(/<a\s[^>]*href="(\/[^"#?]+)"[^>]*>([\s\S]*?)<\/a>/g)) {
+    const time = body.match(/<time[^>]*>([^<]*)<\/time>/);
+    if (!href.startsWith(index.hrefPrefix) && !time) continue;
     const url = index.base + href;
     if (seen.has(url)) continue;
     seen.add(url);
-    out.push({ url, source: index.source });
+    const published = time ? Date.parse(decodeHTML(time[1]).trim()) : Number.NaN;
+    out.push({ url, source: index.source, ...(Number.isNaN(published) ? {} : { published }) });
   }
   return out;
 }
 
-export async function fetchAllBlogEntries(): Promise<BlogEntry[]> {
+/**
+ * Entries of every index that changed since its last fully processed read; an
+ * unchanged index (a 304 — claude.com sends Last-Modified, anthropic.com
+ * nothing, so it is always re-read) contributes none. Null when no index changed.
+ */
+export async function fetchAllBlogEntries(validators?: Validators): Promise<BlogEntry[] | null> {
   const out: BlogEntry[] = [];
+  let changed = false;
   for (const index of BLOG_INDEXES) {
-    const res = await fetch(index.indexUrl, { headers: { "User-Agent": BOT_UA } });
+    const res = await conditionalFetch(index.indexUrl, validators, { "User-Agent": BOT_UA });
+    if (!res) continue;
     if (!res.ok) throw new Error(`${index.source} index fetch failed: ${res.status}`);
+    changed = true;
     out.push(...parseIndexLinks(index, await res.text()));
   }
-  return out;
+  return changed ? out : null;
 }
 
 // Importance drives delivery: major is pinned, minor posts without sound.

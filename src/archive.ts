@@ -125,6 +125,36 @@ export async function readActions(
   return { cursor: actions.length > 0 ? actions[actions.length - 1].seq : since, actions };
 }
 
+/**
+ * The message that posted `url` in `chat`, with its current text: the send
+ * carries the original, a later edit the newest. Null when the archive never
+ * saw it — a gap, or a post older than retention — and the caller treats the
+ * video as standalone rather than guess at a message id.
+ */
+export async function findPostedMessage(
+  db: D1Database | undefined,
+  chat: string,
+  url: string,
+): Promise<{ messageId: number; text: string } | null> {
+  if (!db) return null;
+  try {
+    const row = await db
+      .prepare(
+        `SELECT message_id, text FROM actions
+         WHERE chat = ?1 AND kind IN ('send', 'edit') AND text IS NOT NULL AND message_id = (
+           SELECT message_id FROM actions
+           WHERE chat = ?1 AND kind = 'send' AND text LIKE ?2 ORDER BY seq DESC LIMIT 1)
+         ORDER BY seq DESC LIMIT 1`,
+      )
+      .bind(chat, `%href="${url}"%`)
+      .first<{ message_id: number; text: string }>();
+    return row ? { messageId: row.message_id, text: row.text } : null;
+  } catch (err) {
+    console.log(`archive lookup failed for ${url}: ${err}`);
+    return null;
+  }
+}
+
 export async function readPhoto(
   db: D1Database,
   seq: number,

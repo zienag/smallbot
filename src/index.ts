@@ -1,5 +1,6 @@
 import {
   ANTHROPIC_BLOG_SEEN_KEY,
+  BLOG_INDEXES,
   type BlogEntry,
   type Tier,
   digestArticle,
@@ -7,10 +8,13 @@ import {
   digestBlogPost,
   fetchAllBlogEntries,
   formatBlogPost,
+  isRecentEntry,
 } from "./blogs";
 import { type BrowserRun, QUICK_ACTION_GAP_MS, fetchPageMarkdown } from "./browser";
-import { fetchChangelog } from "./changelog";
-import { fetchCodexReleases } from "./codex";
+import { CHANGELOG_URL, fetchChangelog } from "./changelog";
+import { CODEX_RELEASES_ATOM_URL, fetchCodexReleases } from "./codex";
+import { Validators } from "./conditional";
+import { GROUPS, type Group, groupForCron } from "./crons";
 import {
   KNOWN_MODELS_KEY,
   buildAnnouncements,
@@ -19,6 +23,8 @@ import {
 } from "./models";
 import {
   OPENAI_BLOG_SEEN_KEY,
+  OPENAI_UNLISTED_KEY,
+  UNLISTED_RECHECK_MS,
   type NewsItem,
   articleSlug,
   classifyTier,
@@ -46,13 +52,21 @@ import {
 } from "./openai_dev";
 import { fetchNpmLatest } from "./npm";
 import {
+  type Video,
+  type VideoGroup,
   YOUTUBE_CHANNELS,
   type YouTubeChannel,
+  companionArticle,
+  companionLine,
   digestVideo,
   fetchVideoFeed,
+  formatRoundupPost,
   formatVideoPost,
+  groupVideos,
   isRecentVideo,
+  isSettled,
   isShort,
+  normalizeUrl,
   youtubeSeenKey,
 } from "./youtube";
 import {
@@ -67,7 +81,7 @@ import {
   pruneState,
   seedState,
 } from "./status";
-import { recordAction, readActions, readPhoto } from "./archive";
+import { findPostedMessage, recordAction, readActions, readPhoto } from "./archive";
 import { SUBS_PREFIX, handleTelegramUpdate, notifySubscribers } from "./status_bot";
 import { summarize } from "./summarize";
 import {
@@ -128,30 +142,39 @@ interface FeedRelease {
 
 interface FeedSource {
   key: string; // value of the /run source param
+  group: Group;
   product: string; // post header
   kvKey: string;
+  feedUrl: string; // what the validator is committed against
   npmPkg: string;
   chatId: string | undefined;
   quoteNotes: boolean;
-  fetch(): Promise<FeedRelease[]>; // any order — the pipeline sorts
+  // Any order — the pipeline sorts. Null: unchanged since the last full read.
+  fetch(validators?: Validators): Promise<FeedRelease[] | null>;
 }
 
 function feedSources(env: Env): FeedSource[] {
   return [
     {
       key: "claude",
+      group: "anthropic",
       product: "Claude Code",
       kvKey: "last_posted_version",
+      feedUrl: CHANGELOG_URL,
       npmPkg: "@anthropic-ai/claude-code",
       chatId: env.TELEGRAM_CHAT_ID,
       quoteNotes: true,
-      fetch: async () =>
-        (await fetchChangelog()).map((r) => ({ ...r, url: changelogAnchorUrl(r.version) })),
+      fetch: async (validators) => {
+        const releases = await fetchChangelog(validators);
+        return releases && releases.map((r) => ({ ...r, url: changelogAnchorUrl(r.version) }));
+      },
     },
     {
       key: "codex",
+      group: "openai",
       product: "Codex",
       kvKey: "codex_last_posted_version",
+      feedUrl: CODEX_RELEASES_ATOM_URL,
       npmPkg: "@openai/codex",
       chatId: env.TELEGRAM_CODEX_CHAT_ID,
       // Release body is converted HTML full of PR links, nothing worth quoting.
@@ -194,20 +217,34 @@ async function postRelease(
   await recordAction(env.ARCHIVE, { chat: source.chatId!, kind: "send", messageId, text: post });
 }
 
-async function runFeed(env: Env, source: FeedSource, dryRun: boolean): Promise<string> {
-  const releases = await source.fetch();
-  const npmLatest = await fetchNpmLatest(source.npmPkg);
+async function runFeed(
+  env: Env,
+  source: FeedSource,
+  dryRun: boolean,
+  validators: Validators,
+): Promise<string> {
   const lastPosted = await env.RELEASES.get(source.kvKey);
-  const published = releases
+  // A first run has processed nothing yet, so it reads the feed in full.
+  const releases = await source.fetch(lastPosted ? validators : undefined);
+  if (releases === null) return `${source.key}: unchanged`;
+  const newer = lastPosted
+    ? releases.filter((r) => compareVersions(r.version, lastPosted) > 0)
+    : releases;
+  if (newer.length === 0) {
+    if (!dryRun) validators.commit(source.feedUrl);
+    return `${source.key}: nothing to post (last=${lastPosted})`;
+  }
+
+  // The dist-tag gate is asked only once the feed has something newer: the
+  // answer changes a few times a week, the question would cost every tick.
+  const npmLatest = await fetchNpmLatest(source.npmPkg);
+  const published = newer
     .filter((r) => compareVersions(r.version, npmLatest) <= 0)
     .sort((a, b) => compareVersions(b.version, a.version));
 
   // First run: only the newest published version, no history.
   const candidates = lastPosted
-    ? published
-        .filter((r) => compareVersions(r.version, lastPosted) > 0)
-        .sort((a, b) => compareVersions(a.version, b.version))
-        .slice(0, MAX_PER_RUN)
+    ? published.sort((a, b) => compareVersions(a.version, b.version)).slice(0, MAX_PER_RUN)
     : published.slice(0, 1);
 
   if (candidates.length === 0) {
@@ -220,6 +257,9 @@ async function runFeed(env: Env, source: FeedSource, dryRun: boolean): Promise<s
     if (!dryRun) await env.RELEASES.put(source.kvKey, release.version);
     posted.push(release.version);
   }
+  // Everything newer went out: the next tick may take a 304 at face value. A
+  // version held by the npm gate or the per-tick cap keeps the feed re-read.
+  if (!dryRun && posted.length === newer.length) validators.commit(source.feedUrl);
   return `${source.key}: posted ${posted.join(", ")}${dryRun ? " (dry)" : ""}`;
 }
 
@@ -396,21 +436,41 @@ async function sendPreviewTiered(
 
 const MAX_BLOG_POSTS_PER_TICK = 5;
 
-async function watchAnthropicBlogs(env: Env, dryRun: boolean): Promise<string> {
-  const entries = await fetchAllBlogEntries();
+async function watchAnthropicBlogs(
+  env: Env,
+  dryRun: boolean,
+  validators: Validators,
+): Promise<string> {
   const seenRaw = await env.RELEASES.get(ANTHROPIC_BLOG_SEEN_KEY);
+  // A first run has processed nothing yet, so it reads every index in full.
+  const entries = await fetchAllBlogEntries(seenRaw ? validators : undefined);
+  if (entries === null) return "blog: unchanged";
+  const commitIndexes = () => {
+    if (!dryRun) for (const index of BLOG_INDEXES) validators.commit(index.indexUrl);
+  };
   if (!seenRaw) {
     if (dryRun) return `blog: would seed ${entries.length} seen (dry)`;
     await env.RELEASES.put(ANTHROPIC_BLOG_SEEN_KEY, JSON.stringify(entries.map((e) => e.url)));
+    commitIndexes();
     return `blog: seeded ${entries.length} seen, nothing posted`;
   }
   const seen = new Set(JSON.parse(seenRaw) as string[]);
+  const now = Date.now();
+  // A dated card that is old is a backfill or a feature the index resurfaced,
+  // absorbed into the seen-set without a post — the age gate every watch has.
+  const stale = entries.filter((e) => !seen.has(e.url) && !isRecentEntry(e, now));
+  if (stale.length > 0 && !dryRun) {
+    for (const entry of stale) seen.add(entry.url);
+    await env.RELEASES.put(ANTHROPIC_BLOG_SEEN_KEY, JSON.stringify([...seen]));
+  }
+  const skipped = stale.length > 0 ? `, skipped ${stale.length} stale` : "";
+  const unseen = entries.filter((e) => !seen.has(e.url) && isRecentEntry(e, now));
   // Oldest first; the cap bounds LLM calls per tick, the tail catches up next tick.
-  const fresh = entries
-    .filter((e) => !seen.has(e.url))
-    .reverse()
-    .slice(0, MAX_BLOG_POSTS_PER_TICK);
-  if (fresh.length === 0) return "blog: nothing new";
+  const fresh = unseen.reverse().slice(0, MAX_BLOG_POSTS_PER_TICK);
+  if (fresh.length === 0) {
+    commitIndexes();
+    return `blog: nothing new${skipped}`;
+  }
 
   const posted: string[] = [];
   for (const entry of fresh) {
@@ -425,7 +485,9 @@ async function watchAnthropicBlogs(env: Env, dryRun: boolean): Promise<string> {
     }
     posted.push(`${entry.url} [${digest.tier}]`);
   }
-  return `blog: posted ${posted.join(", ")}${dryRun ? " (dry)" : ""}`;
+  // A tail cut by the cap keeps the indexes re-read until it has caught up.
+  if (posted.length === unseen.length) commitIndexes();
+  return `blog: posted ${posted.join(", ")}${skipped}${dryRun ? " (dry)" : ""}`;
 }
 
 /**
@@ -506,9 +568,23 @@ async function watchOpenAiBlog(env: Env, dryRun: boolean): Promise<string> {
   // Only now, with something worth posting, is the list worth a request:
   // rarely enough that asking cannot arm the challenge on its own. Items it
   // does not list are left out of the seen-set, so a blocked list decides
-  // nothing permanently — the age gate absorbs them a fortnight later.
+  // nothing permanently — the age gate absorbs them a fortnight later — but
+  // its verdict on an item holds for hours, not one tick.
+  const verdictsRaw = await env.RELEASES.get(OPENAI_UNLISTED_KEY);
+  const verdicts = (verdictsRaw ? JSON.parse(verdictsRaw) : {}) as Record<string, number>;
+  const due = recent.filter((i) => !(verdicts[i.guid] > now - UNLISTED_RECHECK_MS));
+  if (due.length === 0 && !dryRun) {
+    return `openai_blog: nothing new${skipped}, ${recent.length} unlisted (verdict held)`;
+  }
   const { slugs: listed, via: listVia } = await fetchNewsListSlugs(env.BROWSER);
   const postable = recent.filter((i) => isListed(i, listed));
+  if (listed && !dryRun) {
+    // Fresh verdicts for what stays unlisted; anything posted, aged out or
+    // newly listed drops off by not being written back.
+    const held: Record<string, number> = {};
+    for (const i of recent) if (!listed.has(articleSlug(i.link))) held[i.guid] = now;
+    await env.RELEASES.put(OPENAI_UNLISTED_KEY, JSON.stringify(held));
+  }
   const fresh = [...postable].reverse().slice(0, MAX_OPENAI_BLOG_PER_TICK);
   const unlisted = recent.length - postable.length;
   if (unlisted > 0) skipped += `, ${unlisted} not in the news list (via=${listVia})`;
@@ -587,7 +663,7 @@ async function buildDevPost(
 
 // Each company's videos land in its blog channel, next to its written posts.
 function youtubeChatId(env: Env, channel: YouTubeChannel): string | undefined {
-  return channel.key === "openai"
+  return channel.group === "openai"
     ? env.TELEGRAM_OPENAI_BLOG_CHAT_ID
     : env.TELEGRAM_ANTHROPIC_BLOG_CHAT_ID;
 }
@@ -617,40 +693,92 @@ async function watchYouTubeChannel(
     await env.RELEASES.put(seenKey, JSON.stringify([...seen]));
   }
   let skipped = stale.length > 0 ? `, skipped ${stale.length} stale` : "";
-  // Oldest first; the cap bounds LLM calls per tick, the tail catches up next tick.
-  const fresh = unseen
-    .filter((v) => isRecentVideo(v, now))
-    .reverse()
-    .slice(0, MAX_BLOG_POSTS_PER_TICK);
+  // Oldest first.
+  const fresh = unseen.filter((v) => isRecentVideo(v, now)).reverse();
   if (fresh.length === 0) return `${tag}: nothing new${skipped}`;
+  // A burst still arriving is judged next tick, whole.
+  if (!isSettled(fresh, now)) return `${tag}: ${fresh.length} new, settling${skipped}`;
 
-  const posted: string[] = [];
+  const markSeen = async (ids: string[]) => {
+    for (const id of ids) seen.add(id);
+    if (!dryRun) await env.RELEASES.put(seenKey, JSON.stringify([...seen]));
+  };
+  const notes: string[] = [];
+  const standalone: Video[] = [];
   let shorts = 0;
+  const articles = await postedArticles(env, channel.group);
   for (const video of fresh) {
     // A Short is a promo cut of a video the channel carries in full — absorbed
     // silently, not posted.
     if (await isShort(video.videoId)) {
       shorts++;
-      if (!dryRun) {
-        seen.add(video.videoId);
-        await env.RELEASES.put(seenKey, JSON.stringify([...seen]));
-      }
+      await markSeen([video.videoId]);
       continue;
     }
-    const digest = await digestVideo(env.ANTHROPIC_API_KEY, env.RELEASES, channel.label, video);
-    const post = formatVideoPost(video, digest.bullets);
-    if (dryRun) {
-      console.log(`DRY_RUN: would post [${digest.tier}] ${video.url}:\n${post}`);
-    } else {
-      await sendTiered(env, chatId, post, digest.tier, { linkPreview: true });
-      seen.add(video.videoId);
-      await env.RELEASES.put(seenKey, JSON.stringify([...seen]));
+    // A video made for an article the channel already carries joins that
+    // post as a line instead of getting one of its own.
+    const article = companionArticle(video, articles);
+    const target = article ? await findPostedMessage(env.ARCHIVE, chatId, article) : null;
+    if (article && target) {
+      const text = `${target.text}\n\n${companionLine(video)}`;
+      if (dryRun) {
+        console.log(`DRY_RUN: would append to the post of ${article}:\n${text}`);
+      } else {
+        await editMessageText(env.TELEGRAM_BOT_TOKEN, chatId, target.messageId, text);
+        await recordAction(env.ARCHIVE, { chat: chatId, kind: "edit", messageId: target.messageId, text });
+        await markSeen([video.videoId]);
+      }
+      notes.push(`${video.title} → ${article}`);
+      continue;
     }
-    posted.push(`${video.title} [${digest.tier}]`);
+    standalone.push(video);
+  }
+
+  // Several videos at once are a batch to split by topic; one is itself.
+  const groups: VideoGroup[] =
+    standalone.length > 1
+      ? await groupVideos(env.ANTHROPIC_API_KEY, env.RELEASES, channel.label, standalone)
+      : standalone.map((v) => ({ title: v.title, tier: "normal", videos: [v] }));
+  // The cap bounds posts per tick, the tail catches up next tick.
+  for (const group of groups.slice(0, MAX_BLOG_POSTS_PER_TICK)) {
+    let post: string;
+    let tier: Tier;
+    if (group.videos.length === 1) {
+      const video = group.videos[0];
+      const digest = await digestVideo(env.ANTHROPIC_API_KEY, env.RELEASES, channel.label, video);
+      post = formatVideoPost(video, digest.bullets);
+      tier = digest.tier;
+    } else {
+      post = formatRoundupPost(group.title, channel.label, group.videos);
+      tier = group.tier;
+    }
+    if (dryRun) {
+      console.log(`DRY_RUN: would post [${tier}]:\n${post}`);
+    } else {
+      // The card is the content of a single video's post; a roundup lists them.
+      await sendTiered(env, chatId, post, tier, { linkPreview: group.videos.length === 1 });
+      await markSeen(group.videos.map((v) => v.videoId));
+    }
+    notes.push(
+      group.videos.length === 1
+        ? `${group.videos[0].title} [${tier}]`
+        : `${group.title} (${group.videos.length} videos) [${tier}]`,
+    );
   }
   if (shorts > 0) skipped += `, ${shorts} shorts`;
-  if (posted.length === 0) return `${tag}: nothing new${skipped}`;
-  return `${tag}: posted ${posted.join(" | ")}${skipped}${dryRun ? " (dry)" : ""}`;
+  if (notes.length === 0) return `${tag}: nothing new${skipped}`;
+  return `${tag}: posted ${notes.join(" | ")}${skipped}${dryRun ? " (dry)" : ""}`;
+}
+
+/** Every article url the company's blog channel has posted, keyed by its normalized form. */
+async function postedArticles(env: Env, group: Group): Promise<Map<string, string>> {
+  const keys = group === "openai" ? [OPENAI_BLOG_SEEN_KEY, OPENAI_DEV_SEEN_KEY] : [ANTHROPIC_BLOG_SEEN_KEY];
+  const posted = new Map<string, string>();
+  for (const key of keys) {
+    const raw = await env.RELEASES.get(key);
+    for (const url of raw ? (JSON.parse(raw) as string[]) : []) posted.set(normalizeUrl(url), url);
+  }
+  return posted;
 }
 
 // Test hook /run?source=youtube&version=<title or video-id substring>, never
@@ -832,7 +960,7 @@ async function forceBlogEntry(
   previewTo?: string,
 ): Promise<string> {
   const q = query.toLowerCase();
-  const entry = (await fetchAllBlogEntries()).find((e) => e.url.toLowerCase().includes(q));
+  const entry = ((await fetchAllBlogEntries()) ?? []).find((e) => e.url.toLowerCase().includes(q));
   if (!entry) return `blog: no post matching ${query}`;
   const digest = await digestBlogPost(env.ANTHROPIC_API_KEY, env.RELEASES, entry);
   const post = formatBlogPost(entry, digest);
@@ -966,7 +1094,13 @@ async function forceModelAnnouncement(
 
 export async function runPipeline(
   env: Env,
-  opts: { forceVersion?: string; dryOverride?: boolean; source?: string; preview?: boolean } = {},
+  opts: {
+    forceVersion?: string;
+    dryOverride?: boolean;
+    source?: string;
+    preview?: boolean;
+    group?: Group; // unset: every group, in order (the /run hook)
+  } = {},
 ): Promise<string> {
   const dryRun = opts.dryOverride ?? env.DRY_RUN === "1";
   const sources = feedSources(env);
@@ -990,67 +1124,64 @@ export async function runPipeline(
     const source = sources.find((s) => s.key === (opts.source ?? "claude"));
     if (!source) return `unknown source ${opts.source}`;
     if (!source.chatId && !dryRun && !previewTo) return `${source.key}: no chat configured`;
-    const release = (await source.fetch()).find((r) => r.version === opts.forceVersion);
+    const release = ((await source.fetch()) ?? []).find((r) => r.version === opts.forceVersion);
     if (!release) return `version ${opts.forceVersion} not found for ${source.key}`;
     await postRelease(env, source, release, dryRun, previewTo);
     if (previewTo) return `previewed ${source.key} ${release.version}`;
     return `force-posted ${source.key} ${release.version}${dryRun ? " (dry)" : ""}`;
   }
 
-  // Sources are isolated: one failing doesn't block the rest (each has its
-  // own KV cursor and catches up next tick).
   const statuses: string[] = [];
-  for (const source of sources) {
-    if (!source.chatId) continue;
+  for (const group of opts.group ? [opts.group] : GROUPS) {
+    statuses.push(...(await runGroup(env, group, sources, dryRun)));
+  }
+  return statuses.join("\n");
+}
+
+// Sources are isolated: one failing doesn't block the rest (each has its
+// own KV cursor and catches up next tick).
+async function runGroup(
+  env: Env,
+  group: Group,
+  sources: FeedSource[],
+  dryRun: boolean,
+): Promise<string[]> {
+  const statuses: string[] = [];
+  const run = async (tag: string, watch: () => Promise<string>) => {
     try {
-      statuses.push(await runFeed(env, source, dryRun));
+      statuses.push(await watch());
     } catch (err) {
-      statuses.push(`${source.key}: failed: ${err}`);
+      statuses.push(`${tag}: failed: ${err}`);
+    }
+  };
+  // Shared by the tick's conditional fetches; a source that failed before
+  // committing leaves its validator staged, and staged is never saved.
+  const validators = await Validators.load(env.RELEASES);
+  for (const source of sources) {
+    if (source.group === group && source.chatId) {
+      await run(source.key, () => runFeed(env, source, dryRun, validators));
     }
   }
   if (env.TELEGRAM_MODELS_CHAT_ID) {
-    try {
-      statuses.push(await watchAnthropicModels(env, dryRun));
-    } catch (err) {
-      statuses.push(`models: failed: ${err}`);
-    }
-    if (env.OPENAI_API_KEY) {
-      try {
-        statuses.push(await watchOpenAiModels(env, dryRun));
-      } catch (err) {
-        statuses.push(`openai_models: failed: ${err}`);
-      }
+    if (group === "anthropic") await run("models", () => watchAnthropicModels(env, dryRun));
+    if (group === "openai" && env.OPENAI_API_KEY) {
+      await run("openai_models", () => watchOpenAiModels(env, dryRun));
     }
   }
-  if (env.TELEGRAM_ANTHROPIC_BLOG_CHAT_ID) {
-    try {
-      statuses.push(await watchAnthropicBlogs(env, dryRun));
-    } catch (err) {
-      statuses.push(`blog: failed: ${err}`);
-    }
+  if (group === "anthropic" && env.TELEGRAM_ANTHROPIC_BLOG_CHAT_ID) {
+    await run("blog", () => watchAnthropicBlogs(env, dryRun, validators));
   }
-  if (env.TELEGRAM_OPENAI_BLOG_CHAT_ID) {
-    try {
-      statuses.push(await watchOpenAiBlog(env, dryRun));
-    } catch (err) {
-      statuses.push(`openai_blog: failed: ${err}`);
-    }
-    try {
-      statuses.push(await watchOpenAiDevBlog(env, dryRun));
-    } catch (err) {
-      statuses.push(`openai_dev: failed: ${err}`);
-    }
+  if (group === "openai" && env.TELEGRAM_OPENAI_BLOG_CHAT_ID) {
+    await run("openai_blog", () => watchOpenAiBlog(env, dryRun));
+    await run("openai_dev", () => watchOpenAiDevBlog(env, dryRun));
   }
   for (const channel of YOUTUBE_CHANNELS) {
     const chatId = youtubeChatId(env, channel);
-    if (!chatId) continue;
-    try {
-      statuses.push(await watchYouTubeChannel(env, channel, chatId, dryRun));
-    } catch (err) {
-      statuses.push(`youtube_${channel.key}: failed: ${err}`);
-    }
+    if (channel.group !== group || !chatId) continue;
+    await run(`youtube_${channel.key}`, () => watchYouTubeChannel(env, channel, chatId, dryRun));
   }
-  return statuses.join("\n");
+  await validators.save(env.RELEASES);
+  return statuses;
 }
 
 /**
@@ -1071,12 +1202,6 @@ export async function runStatusTick(
     return `status: failed: ${err}`;
   }
 }
-
-// Incidents get the faster of the two crons in wrangler.jsonc: their median
-// life is under an hour and a quarter of them are shorter than 25 minutes, so
-// a 15-minute loop would routinely collapse one into a single message that
-// opens and resolves at once.
-const STATUS_CRON = "*/5 * * * *";
 
 /**
  * Read-only view of the archive, behind its own token: a puller holding it can
@@ -1111,7 +1236,12 @@ async function handleArchive(request: Request, env: Env, url: URL): Promise<Resp
 
 export default {
   async scheduled(event, env, _ctx) {
-    console.log(event.cron === STATUS_CRON ? await runStatusTick(env) : await runPipeline(env));
+    const group = groupForCron(event.cron);
+    if (group === null) {
+      console.log(`unknown cron "${event.cron}": nothing run — wrangler.jsonc and src/crons.ts disagree`);
+      return;
+    }
+    console.log(group === "status" ? await runStatusTick(env) : await runPipeline(env, { group }));
   },
 
   async fetch(request, env) {

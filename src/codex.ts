@@ -1,4 +1,5 @@
 import { decodeHTML } from "entities";
+import { type Validators, conditionalFetch } from "./conditional";
 import { htmlToText } from "./html";
 import { compareVersions } from "./version";
 
@@ -32,8 +33,10 @@ export function parseReleasesAtom(xml: string): CodexRelease[] {
   return releases.sort((a, b) => compareVersions(b.version, a.version));
 }
 
-export async function fetchCodexReleases(): Promise<CodexRelease[]> {
-  const res = await fetch(CODEX_RELEASES_ATOM_URL);
+/** Null: unchanged since the last fully processed read (a 304). */
+export async function fetchCodexReleases(validators?: Validators): Promise<CodexRelease[] | null> {
+  const res = await conditionalFetch(CODEX_RELEASES_ATOM_URL, validators);
+  if (!res) return null;
   if (!res.ok) throw new Error(`codex releases fetch failed: ${res.status}`);
   return parseReleasesAtom(await res.text());
 }

@@ -3,7 +3,13 @@ import { describe, expect, it } from "vitest";
 import { parseChangelog } from "../src/changelog";
 import { parseReleasesAtom } from "../src/codex";
 import { articleText, htmlToText, pageTitle } from "../src/html";
-import { articleImages, findPressRelease, formatNewModelsPost, isDatedSnapshot } from "../src/models";
+import {
+  articleImages,
+  findPressRelease,
+  formatNewModelsPost,
+  isDatedSnapshot,
+  slugNamesVersion,
+} from "../src/models";
 import { formatOpenAiModelPost, parseRss } from "../src/openai_news";
 import { compareVersions } from "../src/version";
 import { buildPost, changelogAnchorUrl, escapeHtml, formatInline } from "../src/telegram";
@@ -219,6 +225,48 @@ describe("findPressRelease", () => {
     });
     expect(press?.url).toBe("https://www.anthropic.com/news/claude-4");
     expect(await findPressRelease("claude-opus-4", async () => null)).toBeNull();
+  });
+
+  it("a point release never takes its major's launch page, and finds its own outside /news/", async () => {
+    const sitemap =
+      sitemapEntry("/news/claude-fable-5-mythos-5", "2026-07-01") +
+      sitemapEntry("/claude-fable-and-mythos-5-1", "2026-09-01") +
+      sitemapEntry("/claude-fable-5-1-system-card/appendix", "2026-09-01");
+    const fetchPage = async (url: string) => {
+      if (url === "https://www.anthropic.com/sitemap.xml") return sitemap;
+      if (url === "https://www.anthropic.com/claude-fable-and-mythos-5-1") return page("Introducing Claude Fable 5.1");
+      if (url === "https://www.anthropic.com/news/claude-fable-5-mythos-5") return page("Claude Fable 5 and Claude Mythos 5");
+      return null;
+    };
+    expect((await findPressRelease("claude-fable-5-1", fetchPage))?.url).toBe(
+      "https://www.anthropic.com/claude-fable-and-mythos-5-1",
+    );
+    expect((await findPressRelease("claude-fable-5", fetchPage))?.url).toBe(
+      "https://www.anthropic.com/news/claude-fable-5-mythos-5",
+    );
+  });
+
+  it("prefers a /news/ page over a top-level one for the same version", async () => {
+    const sitemap =
+      sitemapEntry("/claude-opus-6", "2027-01-02") + sitemapEntry("/news/claude-opus-6-launch", "2027-01-01");
+    const press = await findPressRelease("claude-opus-6", async (url) => {
+      if (url === "https://www.anthropic.com/sitemap.xml") return sitemap;
+      if (url.startsWith("https://www.anthropic.com/news/claude-opus-6-launch")) return page("Opus 6");
+      if (url === "https://www.anthropic.com/claude-opus-6") return page("Opus 6 product page");
+      return null;
+    });
+    expect(press?.url).toBe("https://www.anthropic.com/news/claude-opus-6-launch");
+  });
+});
+
+describe("slugNamesVersion", () => {
+  it("takes numeric runs whole", () => {
+    expect(slugNamesVersion("claude-fable-and-mythos-5-1", "fable", "5-1")).toBe(true);
+    expect(slugNamesVersion("claude-fable-and-mythos-5-1", "fable", "5")).toBe(false);
+    expect(slugNamesVersion("claude-fable-5-mythos-5", "fable", "5")).toBe(true);
+    expect(slugNamesVersion("claude-fable-5-mythos-5", "fable", "5-1")).toBe(false);
+    expect(slugNamesVersion("claude-opus-4-8", "opus", "4-8")).toBe(true);
+    expect(slugNamesVersion("claude-sonnet-4-5", "opus", "4-5")).toBe(false);
   });
 });
 

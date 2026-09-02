@@ -39,13 +39,16 @@ export interface ModelAnnouncement {
   press?: { url: string; title: string; bullets: string[]; photos: FetchedImage[] };
 }
 
+/** One plain GET, like the OpenAI side: the SDK's request machinery costs a tick CPU it can skip. */
 export async function listModels(apiKey: string): Promise<ModelInfo[]> {
-  const client = new Anthropic({ apiKey });
-  const models: ModelInfo[] = [];
-  for await (const m of client.models.list()) {
-    models.push({ id: m.id, displayName: m.display_name, createdAt: m.created_at });
-  }
-  return models;
+  const res = await fetch("https://api.anthropic.com/v1/models?limit=1000", {
+    headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
+  });
+  if (!res.ok) throw new Error(`models fetch failed: ${res.status}`);
+  const body = (await res.json()) as {
+    data: { id: string; display_name: string; created_at: string }[];
+  };
+  return body.data.map((m) => ({ id: m.id, displayName: m.display_name, createdAt: m.created_at }));
 }
 
 /** Dated snapshots don't get press releases — only aliases are enriched. */
@@ -56,10 +59,14 @@ export function isDatedSnapshot(id: string): boolean {
 /**
  * Point releases are announced at /news/<alias> (verified: claude-opus-4-8,
  * claude-sonnet-4-5, claude-haiku-4-5, claude-opus-4-1). Family launches use a
- * combined slug (claude-4, claude-fable-5-mythos-5), found via sitemap.xml:
- * the /news index only shows recent posts so announcements age out of it fast,
- * while the sitemap is complete. Match a claude-* slug containing the family
- * token and major version (or exactly claude-<major>); freshest lastmod wins.
+ * combined slug, found via sitemap.xml — the /news index only shows recent
+ * posts so announcements age out of it fast, while the sitemap is complete —
+ * and not always under /news/: the Fable 5.1 launch lives at
+ * /claude-fable-and-mythos-5-1. A slug matches when it carries the family
+ * token and exactly the model's version: `5-1` is not `5`, or the 5.1 model
+ * would pick up the Fable 5 launch page, as it did on 2026-09-01. /news/
+ * slugs beat top-level ones, then the freshest lastmod wins; `/news/claude-N`
+ * is the family launch of a major without its own page.
  */
 export async function findPressRelease(
   modelId: string,
@@ -68,26 +75,47 @@ export async function findPressRelease(
   const direct = toPress(`${NEWS_BASE}/${modelId}`, await fetchPage(`${NEWS_BASE}/${modelId}`));
   if (direct) return direct;
 
-  const m = modelId.match(/^claude-([a-z]+)-(\d+)/);
+  const m = modelId.match(/^claude-([a-z]+)-(\d+(?:-\d+)*)$/);
   if (!m) return null;
-  const [, family, major] = m;
+  const [, family, version] = m;
+  const major = version.split("-")[0];
   const sitemap = await fetchPage(SITEMAP_URL);
   if (!sitemap) return null;
-  const matches: { url: string; lastmod: string }[] = [];
+  const matches: { url: string; lastmod: string; news: boolean }[] = [];
   for (const [, block] of sitemap.matchAll(/<url>([\s\S]*?)<\/url>/g)) {
     const url = block.match(/<loc>([^<]+)<\/loc>/)?.[1];
     if (!url) continue;
     const slug = url.replace(/^https:\/\/www\.anthropic\.com/, "");
-    if (!slug.startsWith("/news/claude")) continue;
-    if (!((slug.includes(family) && slug.includes(major)) || slug === `/news/claude-${major}`)) continue;
-    matches.push({ url, lastmod: block.match(/<lastmod>([^<]+)<\/lastmod>/)?.[1] ?? "" });
+    const news = slug.startsWith("/news/");
+    const path = news ? slug.slice("/news/".length) : slug.slice(1);
+    if (path.includes("/") || !path.startsWith("claude")) continue;
+    if (!(slugNamesVersion(path, family, version) || (news && path === `claude-${major}`))) continue;
+    matches.push({ url, lastmod: block.match(/<lastmod>([^<]+)<\/lastmod>/)?.[1] ?? "", news });
   }
-  const best = matches.sort((a, b) => b.lastmod.localeCompare(a.lastmod))[0];
+  const best = matches.sort(
+    (a, b) => Number(b.news) - Number(a.news) || b.lastmod.localeCompare(a.lastmod),
+  )[0];
   if (!best) {
     console.log(`no press release found for ${modelId}`);
     return null;
   }
   return toPress(best.url, await fetchPage(best.url));
+}
+
+/** The slug's numeric runs, each taken whole: `fable-5-mythos-5` has `5` and `5`, never `5-1`. */
+export function slugNamesVersion(slug: string, family: string, version: string): boolean {
+  const tokens = slug.split("-");
+  if (!tokens.includes(family)) return false;
+  const runs: string[] = [];
+  let run: string[] = [];
+  for (const t of [...tokens, ""]) {
+    if (/^\d+$/.test(t)) run.push(t);
+    else if (run.length > 0) {
+      runs.push(run.join("-"));
+      run = [];
+    }
+  }
+  return runs.includes(version);
 }
 
 function toPress(url: string, page: string | null): PressRelease | null {

@@ -1,6 +1,104 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it } from "vitest";
-import { formatVideoPost, isRecentVideo, parseVideoFeed } from "../src/youtube";
+import { describe, expect, it, vi } from "vitest";
+import {
+  companionArticle,
+  companionLine,
+  formatRoundupPost,
+  formatVideoPost,
+  groupVideos,
+  isRecentVideo,
+  isSettled,
+  normalizeUrl,
+  parseVideoFeed,
+} from "../src/youtube";
+
+describe("isSettled", () => {
+  const now = Date.now();
+  const at = (ageMs: number) => ({ videoId: "x", title: "t", url: "u", published: now - ageMs, description: "" });
+
+  it("holds a batch whose newest video is under five minutes old", () => {
+    expect(isSettled([at(20 * 60_000), at(2 * 60_000)], now)).toBe(false);
+    expect(isSettled([at(20 * 60_000), at(6 * 60_000)], now)).toBe(true);
+    expect(isSettled([], now)).toBe(true);
+  });
+});
+
+describe("companionArticle", () => {
+  const posted = new Map([
+    ["https://www.anthropic.com/claude-fable-and-mythos-5-1", "https://www.anthropic.com/claude-fable-and-mythos-5-1"],
+    ["https://www.anthropic.com/news/enterprise-frontier-safeguards", "https://www.anthropic.com/news/enterprise-frontier-safeguards"],
+  ]);
+  const video = (description: string) => ({ videoId: "v", title: "T", url: "u", published: 0, description });
+
+  it("finds the posted article a description links to, modulo slashes and query strings", () => {
+    expect(companionArticle(video("Learn more: https://www.anthropic.com/claude-fable-and-mythos-5-1/?utm=yt"), posted)).toBe(
+      "https://www.anthropic.com/claude-fable-and-mythos-5-1",
+    );
+    expect(companionArticle(video("Read the post https://www.anthropic.com/news/enterprise-frontier-safeguards."), posted)).toBe(
+      "https://www.anthropic.com/news/enterprise-frontier-safeguards",
+    );
+  });
+
+  it("is null for links the channel never posted, or no links", () => {
+    expect(companionArticle(video("https://www.anthropic.com/claude/fable"), posted)).toBeNull();
+    expect(companionArticle(video("no links here"), posted)).toBeNull();
+  });
+
+  it("normalizes scheme, trailing slashes and query strings only", () => {
+    expect(normalizeUrl("http://a.com/x/?q=1#h")).toBe("https://a.com/x");
+    expect(normalizeUrl("https://a.com/x")).toBe("https://a.com/x");
+  });
+});
+
+describe("roundup and companion formats", () => {
+  const videos = [
+    { videoId: "d1", title: "Demo <one>", url: "https://www.youtube.com/watch?v=d1", published: 0, description: "" },
+    { videoId: "d2", title: "Demo two", url: "https://www.youtube.com/watch?v=d2", published: 0, description: "" },
+  ];
+
+  it("a roundup leads with the topic and counts the videos, then lists them as links", () => {
+    expect(formatRoundupPost("Fable 5.1 launch demos", "Claude YouTube", videos)).toBe(
+      "<b>Fable 5.1 launch demos</b> · 2 videos on Claude YouTube\n\n" +
+        '• <a href="https://www.youtube.com/watch?v=d1">Demo &lt;one&gt;</a>\n' +
+        '• <a href="https://www.youtube.com/watch?v=d2">Demo two</a>',
+    );
+  });
+
+  it("a companion line is a play mark and the linked title", () => {
+    expect(companionLine(videos[0])).toBe('▶ <a href="https://www.youtube.com/watch?v=d1">Demo &lt;one&gt;</a>');
+  });
+});
+
+describe("groupVideos", () => {
+  const kv = {} as KVNamespace;
+  const v = (id: string) => ({ videoId: id, title: `Title ${id}`, url: `u${id}`, published: 0, description: "d" });
+
+  it("keeps the model's groups, drops invented ids, and gives forgotten videos a group of their own", async () => {
+    structured.mockResolvedValue({
+      groups: [
+        { title: "Launch demos", tier: "minor", videoIds: ["a", "b", "ghost"] },
+        { title: "Dup", tier: "normal", videoIds: ["a"] },
+      ],
+    });
+    const groups = await groupVideos("key", kv, "Claude YouTube", [v("a"), v("b"), v("c")]);
+    expect(groups.map((g) => [g.title, g.tier, g.videos.map((x) => x.videoId)])).toEqual([
+      ["Launch demos", "minor", ["a", "b"]],
+      ["Title c", "normal", ["c"]],
+    ]);
+  });
+
+  it("puts every video, its title and description in the prompt", async () => {
+    structured.mockResolvedValue({ groups: [] });
+    await groupVideos("key", kv, "OpenAI YouTube", [v("a"), v("b")]);
+    const prompt = structured.mock.calls.at(-1)?.[2] as string;
+    expect(prompt).toContain("a | Title a | d");
+    expect(prompt).toContain("b | Title b | d");
+    expect(prompt).toContain("in English");
+  });
+});
+
+const structured = vi.hoisted(() => vi.fn());
+vi.mock("../src/summarize", () => ({ structuredFromPrompt: structured }));
 
 describe("parseVideoFeed", () => {
   const videos = parseVideoFeed(fixture);

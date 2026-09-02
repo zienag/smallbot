@@ -2,7 +2,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Incident } from "../src/status";
 import { STATUS_INCIDENTS_KEY, type StatusState } from "../src/status";
 import type { Env } from "../src/index";
-import { runPipeline, runStatusTick } from "../src/index";
+import { CHANGELOG_URL } from "../src/changelog";
+import { VALIDATORS_KEY, Validators } from "../src/conditional";
+import { ANTHROPIC_CRON, OPENAI_CRON } from "../src/crons";
+import worker, { runPipeline, runStatusTick } from "../src/index";
 import { YOUTUBE_CHANNELS } from "../src/youtube";
 
 describe("release feed", () => {
@@ -67,6 +70,173 @@ describe("release feed", () => {
     expect(result).toBe("claude: posted 1.0.2");
     expect(mocks.sendMessage).toHaveBeenCalledTimes(1);
     expect(kv.store.get("last_posted_version")).toBe("1.0.2");
+  });
+
+  it("asks npm only when the feed has something newer than the cursor", async () => {
+    const kv = fakeKv({ last_posted_version: "1.0.2" });
+    const result = await runPipeline(feedEnv(kv));
+
+    expect(result).toBe("claude: nothing to post (last=1.0.2)");
+    expect(mocks.fetchNpmLatest).not.toHaveBeenCalled();
+  });
+});
+
+describe("conditional feeds", () => {
+  it("reports a feed that answered 304 as unchanged", async () => {
+    mocks.fetchChangelog.mockResolvedValue(null);
+    const kv = fakeKv({ last_posted_version: "1.0.2" });
+
+    expect(await runPipeline(feedEnv(kv))).toBe("claude: unchanged");
+  });
+
+  it("a first run reads the feed unconditionally", async () => {
+    const kv = fakeKv();
+    await runPipeline(feedEnv(kv));
+
+    expect(mocks.fetchChangelog).toHaveBeenCalledWith(undefined);
+  });
+
+  it("commits the feed's validator only once everything newer is posted", async () => {
+    mocks.fetchChangelog.mockImplementation(async (validators?: Validators) => {
+      validators?.stage(CHANGELOG_URL, new Response("", { headers: { etag: '"v1"' } }));
+      return [
+        { version: "1.0.2", notes: "- two" },
+        { version: "1.0.1", notes: "- one" },
+      ];
+    });
+    const kv = fakeKv({ last_posted_version: "1.0.0" });
+
+    // The npm gate holds 1.0.2 back: the feed must be re-read next tick.
+    mocks.fetchNpmLatest.mockResolvedValue("1.0.1");
+    expect(await runPipeline(feedEnv(kv))).toBe("claude: posted 1.0.1");
+    expect(kv.store.has(VALIDATORS_KEY)).toBe(false);
+
+    mocks.fetchNpmLatest.mockResolvedValue("1.0.2");
+    expect(await runPipeline(feedEnv(kv))).toBe("claude: posted 1.0.2");
+    expect(JSON.parse(kv.store.get(VALIDATORS_KEY)!)).toEqual({ [CHANGELOG_URL]: { etag: '"v1"' } });
+
+    // Nothing newer: a full read with nothing to do commits as well.
+    kv.store.delete(VALIDATORS_KEY);
+    expect(await runPipeline(feedEnv(kv))).toBe("claude: nothing to post (last=1.0.2)");
+    expect(kv.store.has(VALIDATORS_KEY)).toBe(true);
+  });
+
+  it("a dry run never commits a validator", async () => {
+    mocks.fetchChangelog.mockImplementation(async (validators?: Validators) => {
+      validators?.stage(CHANGELOG_URL, new Response("", { headers: { etag: '"v1"' } }));
+      return [{ version: "1.0.2", notes: "- two" }];
+    });
+    const kv = fakeKv({ last_posted_version: "1.0.2" });
+
+    await runPipeline(feedEnv(kv), { dryOverride: true });
+    expect(kv.store.has(VALIDATORS_KEY)).toBe(false);
+  });
+
+  it("absorbs an old dated card into the seen-set without posting it", async () => {
+    const now = Date.now();
+    const day = 24 * 60 * 60 * 1000;
+    mocks.fetchAllBlogEntries.mockResolvedValue([
+      { url: "https://www.anthropic.com/claude-fable-and-mythos-5-1", source: "Anthropic News", published: now - day },
+      { url: "https://www.anthropic.com/features/making-of-claude-code", source: "Anthropic News", published: now - 58 * day },
+    ]);
+    mocks.digestBlogPost.mockResolvedValue({ title: "Fable 5.1", tier: "major", bullets: ["a fact"] });
+    const kv = fakeKv({ anthropic_blog_seen: "[]", "youtube_seen:claude": "[]", "youtube_seen:anthropic": "[]" });
+    const env = { ...feedEnv(kv), TELEGRAM_CHAT_ID: undefined, TELEGRAM_ANTHROPIC_BLOG_CHAT_ID: "@blogs" };
+
+    const result = await runPipeline(env as unknown as Env);
+
+    expect(result).toContain("blog: posted https://www.anthropic.com/claude-fable-and-mythos-5-1 [major], skipped 1 stale");
+    expect(mocks.sendMessage).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(kv.store.get("anthropic_blog_seen")!)).toEqual([
+      "https://www.anthropic.com/features/making-of-claude-code",
+      "https://www.anthropic.com/claude-fable-and-mythos-5-1",
+    ]);
+  });
+
+  it("reports unchanged blog indexes without touching the seen-set", async () => {
+    mocks.fetchAllBlogEntries.mockResolvedValue(null);
+    const kv = fakeKv({ anthropic_blog_seen: JSON.stringify(["https://a.com/news/old"]) });
+    const env = { ...feedEnv(kv), TELEGRAM_CHAT_ID: undefined, TELEGRAM_ANTHROPIC_BLOG_CHAT_ID: "@blogs" };
+
+    expect((await runPipeline(env as unknown as Env)).split("\n")[0]).toBe("blog: unchanged");
+    expect(mocks.fetchAllBlogEntries.mock.calls[0][0]).toBeInstanceOf(Validators);
+    expect(kv.store.get("anthropic_blog_seen")).toBe(JSON.stringify(["https://a.com/news/old"]));
+  });
+});
+
+describe("openai news list verdicts", () => {
+  const now = Date.now();
+  const item = {
+    title: "A customer story",
+    link: "https://openai.com/index/customer-story",
+    description: "d",
+    guid: "https://openai.com/index/customer-story",
+    published: now - 60_000,
+    category: "",
+  };
+  const env = (kv: FakeKv) =>
+    ({ ...feedEnv(kv), TELEGRAM_CHAT_ID: undefined, TELEGRAM_OPENAI_BLOG_CHAT_ID: "@oai" }) as unknown as Env;
+
+  it("asks the news list about an unlisted item once, then holds the verdict for hours", async () => {
+    mocks.fetchOpenAiNews.mockResolvedValue([item]);
+    mocks.fetchNewsListSlugs.mockResolvedValue({ slugs: new Set(["index/something-else"]), via: "fetch" });
+    const kv = fakeKv({ openai_blog_seen: "[]", openai_dev_blog_seen: "[]", "youtube_seen:openai": "[]" });
+
+    const first = await runPipeline(env(kv), { group: "openai" });
+    expect(first).toContain("openai_blog: nothing new, 1 not in the news list (via=fetch)");
+    expect(mocks.fetchNewsListSlugs).toHaveBeenCalledTimes(1);
+    expect(Object.keys(JSON.parse(kv.store.get("openai_unlisted")!))).toEqual([item.guid]);
+
+    const second = await runPipeline(env(kv), { group: "openai" });
+    expect(second).toContain("openai_blog: nothing new, 1 unlisted (verdict held)");
+    expect(mocks.fetchNewsListSlugs).toHaveBeenCalledTimes(1);
+
+    kv.store.set("openai_unlisted", JSON.stringify({ [item.guid]: now - 7 * 60 * 60 * 1000 }));
+    await runPipeline(env(kv), { group: "openai" });
+    expect(mocks.fetchNewsListSlugs).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not hold a verdict when the list was unreachable", async () => {
+    mocks.fetchOpenAiNews.mockResolvedValue([item]);
+    mocks.fetchNewsListSlugs.mockResolvedValue({ slugs: null, via: "fetch:403 browser:failed" });
+    const kv = fakeKv({ openai_blog_seen: "[]", openai_dev_blog_seen: "[]", "youtube_seen:openai": "[]" });
+
+    await runPipeline(env(kv), { group: "openai" });
+    await runPipeline(env(kv), { group: "openai" });
+    expect(mocks.fetchNewsListSlugs).toHaveBeenCalledTimes(2);
+    expect(kv.store.has("openai_unlisted")).toBe(false);
+  });
+});
+
+describe("cron dispatch", () => {
+  it("runs one company's sources per cron and leaves an unowned cron alone", async () => {
+    const kv = fakeKv({ last_posted_version: "1.0.2", codex_last_posted_version: "0.1.0" });
+    const env = { ...feedEnv(kv), TELEGRAM_CODEX_CHAT_ID: "@codex" } as unknown as Env;
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const tick = (cron: string) =>
+      worker.scheduled({ cron } as Parameters<typeof worker.scheduled>[0], env, {} as never);
+
+    await tick(OPENAI_CRON);
+    expect(log.mock.calls.at(-1)?.[0]).toBe("codex: posted 0.1.1");
+    expect(mocks.fetchChangelog).not.toHaveBeenCalled();
+
+    await tick(ANTHROPIC_CRON);
+    expect(log.mock.calls.at(-1)?.[0]).toBe("claude: nothing to post (last=1.0.2)");
+    expect(mocks.fetchCodexReleases).toHaveBeenCalledTimes(1);
+
+    await tick("1 2 3 4 5");
+    expect(log.mock.calls.at(-1)?.[0]).toContain("unknown cron");
+    expect(mocks.fetchChangelog).toHaveBeenCalledTimes(1);
+    log.mockRestore();
+  });
+
+  it("the /run hook without a group runs every company", async () => {
+    const kv = fakeKv({ last_posted_version: "1.0.0", codex_last_posted_version: "0.1.0" });
+    const env = { ...feedEnv(kv), TELEGRAM_CODEX_CHAT_ID: "@codex" } as unknown as Env;
+
+    const result = await runPipeline(env);
+
+    expect(result).toBe("claude: posted 1.0.1, 1.0.2\ncodex: posted 0.1.1");
   });
 });
 
@@ -141,6 +311,90 @@ describe("youtube videos", () => {
   });
 });
 
+describe("youtube batches", () => {
+  const now = Date.now();
+  const minute = 60 * 1000;
+  const claude = YOUTUBE_CHANNELS.find((c) => c.key === "claude")!;
+  const video = (id: string, title: string, ageMs: number, description = "") => ({
+    videoId: id,
+    title,
+    url: `https://www.youtube.com/watch?v=${id}`,
+    published: now - ageMs,
+    description,
+  });
+  const blogEnv = (kv: FakeKv) =>
+    ({ ...feedEnv(kv), TELEGRAM_CHAT_ID: undefined, TELEGRAM_ANTHROPIC_BLOG_CHAT_ID: "@blogs" }) as unknown as Env;
+  const feedOf = (videos: unknown[]) =>
+    mocks.fetchVideoFeed.mockImplementation(async (channelId: string) =>
+      channelId === claude.channelId ? videos : [],
+    );
+
+  it("waits out a burst that is still arriving", async () => {
+    mocks.fetchAllBlogEntries.mockResolvedValue(null);
+    feedOf([video("v2", "Second", 2 * minute), video("v1", "First", 10 * minute)]);
+    const kv = fakeKv({ "youtube_seen:claude": "[]", "youtube_seen:anthropic": "[]", anthropic_blog_seen: "[]" });
+
+    const result = await runPipeline(blogEnv(kv));
+
+    expect(result).toContain("youtube_claude: 2 new, settling");
+    expect(mocks.sendMessage).not.toHaveBeenCalled();
+    expect(kv.store.get("youtube_seen:claude")).toBe("[]");
+  });
+
+  it("appends a companion video to its article's post instead of posting it", async () => {
+    mocks.fetchAllBlogEntries.mockResolvedValue(null);
+    const article = "https://www.anthropic.com/claude-fable-and-mythos-5-1";
+    feedOf([video("v1", "Introducing Claude Fable 5.1", 10 * minute, `Read more: ${article}/`)]);
+    mocks.findPostedMessage.mockResolvedValue({ messageId: 64, text: "<b>Introducing Claude Fable 5.1</b>\n\n• a fact" });
+    const kv = fakeKv({
+      "youtube_seen:claude": "[]",
+      "youtube_seen:anthropic": "[]",
+      anthropic_blog_seen: JSON.stringify([article]),
+    });
+
+    const result = await runPipeline(blogEnv(kv));
+
+    expect(result).toContain(`youtube_claude: posted Introducing Claude Fable 5.1 → ${article}`);
+    expect(mocks.findPostedMessage).toHaveBeenCalledWith(undefined, "@blogs", article);
+    expect(mocks.sendMessage).not.toHaveBeenCalled();
+    expect(mocks.editMessageText).toHaveBeenCalledWith(
+      "bot-token",
+      "@blogs",
+      64,
+      '<b>Introducing Claude Fable 5.1</b>\n\n• a fact\n\n▶ <a href="https://www.youtube.com/watch?v=v1">Introducing Claude Fable 5.1</a>',
+    );
+    expect(JSON.parse(kv.store.get("youtube_seen:claude")!)).toEqual(["v1"]);
+  });
+
+  it("posts a settled batch as one roundup per topic and a card per lone video", async () => {
+    mocks.fetchAllBlogEntries.mockResolvedValue(null);
+    const demos = [video("d1", "Demo one", 12 * minute), video("d2", "Demo two", 11 * minute)];
+    const lone = video("s1", "How Claude thinks", 10 * minute);
+    // The feed is newest first; the batch is handled oldest first.
+    feedOf([lone, demos[1], demos[0]]);
+    mocks.groupVideos.mockResolvedValue([
+      { title: "Fable 5.1 launch demos", tier: "minor", videos: demos },
+      { title: lone.title, tier: "normal", videos: [lone] },
+    ]);
+    const kv = fakeKv({ "youtube_seen:claude": "[]", "youtube_seen:anthropic": "[]", anthropic_blog_seen: "[]" });
+
+    const result = await runPipeline(blogEnv(kv));
+
+    expect(result).toContain(
+      "youtube_claude: posted Fable 5.1 launch demos (2 videos) [minor] | How Claude thinks [normal]",
+    );
+    expect(mocks.groupVideos.mock.calls[0][3].map((v: { videoId: string }) => v.videoId)).toEqual(["d1", "d2", "s1"]);
+    expect(mocks.sendMessage.mock.calls.map((c) => [c[2], c[3]])).toEqual([
+      [
+        '<b>Fable 5.1 launch demos</b> · 2 videos on Claude YouTube\n\n• <a href="https://www.youtube.com/watch?v=d1">Demo one</a>\n• <a href="https://www.youtube.com/watch?v=d2">Demo two</a>',
+        { silent: true },
+      ],
+      [expect.stringContaining("How Claude thinks"), { silent: false, linkPreview: true }],
+    ]);
+    expect(JSON.parse(kv.store.get("youtube_seen:claude")!)).toEqual(["d1", "d2", "s1"]);
+  });
+});
+
 describe("status cards", () => {
   it("opens a high-impact card loud, pins it, and records the posted updates", async () => {
     const incident = makeIncident({ impact: "major" });
@@ -200,14 +454,20 @@ const mocks = vi.hoisted(() => ({
   unpinMessage: vi.fn(),
   sendAlbum: vi.fn(),
   fetchChangelog: vi.fn(),
+  fetchCodexReleases: vi.fn(),
   fetchNpmLatest: vi.fn(),
   summarize: vi.fn(),
   fetchIncidents: vi.fn(),
   fetchAllBlogEntries: vi.fn(),
   digestBlogPost: vi.fn(),
+  fetchOpenAiNews: vi.fn(),
+  fetchNewsListSlugs: vi.fn(),
+  fetchDevPosts: vi.fn(),
   fetchVideoFeed: vi.fn(),
   isShort: vi.fn(),
   digestVideo: vi.fn(),
+  groupVideos: vi.fn(),
+  findPostedMessage: vi.fn(),
 }));
 
 vi.mock("../src/telegram", async (importOriginal) => ({
@@ -218,7 +478,14 @@ vi.mock("../src/telegram", async (importOriginal) => ({
   unpinMessage: mocks.unpinMessage,
   sendAlbum: mocks.sendAlbum,
 }));
-vi.mock("../src/changelog", () => ({ fetchChangelog: mocks.fetchChangelog }));
+vi.mock("../src/changelog", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/changelog")>()),
+  fetchChangelog: mocks.fetchChangelog,
+}));
+vi.mock("../src/codex", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/codex")>()),
+  fetchCodexReleases: mocks.fetchCodexReleases,
+}));
 vi.mock("../src/npm", () => ({ fetchNpmLatest: mocks.fetchNpmLatest }));
 vi.mock("../src/summarize", () => ({ summarize: mocks.summarize }));
 vi.mock("../src/status", async (importOriginal) => ({
@@ -230,11 +497,25 @@ vi.mock("../src/blogs", async (importOriginal) => ({
   fetchAllBlogEntries: mocks.fetchAllBlogEntries,
   digestBlogPost: mocks.digestBlogPost,
 }));
+vi.mock("../src/openai_news", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/openai_news")>()),
+  fetchOpenAiNews: mocks.fetchOpenAiNews,
+  fetchNewsListSlugs: mocks.fetchNewsListSlugs,
+}));
+vi.mock("../src/openai_dev", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/openai_dev")>()),
+  fetchDevPosts: mocks.fetchDevPosts,
+}));
 vi.mock("../src/youtube", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/youtube")>()),
   fetchVideoFeed: mocks.fetchVideoFeed,
   isShort: mocks.isShort,
   digestVideo: mocks.digestVideo,
+  groupVideos: mocks.groupVideos,
+}));
+vi.mock("../src/archive", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/archive")>()),
+  findPostedMessage: mocks.findPostedMessage,
 }));
 
 beforeEach(() => {
@@ -246,12 +527,22 @@ beforeEach(() => {
     { version: "1.0.0", notes: "- zero" },
   ]);
   mocks.fetchNpmLatest.mockResolvedValue("1.0.2");
+  mocks.fetchCodexReleases.mockResolvedValue([
+    { version: "0.1.1", url: "https://github.com/openai/codex/releases/tag/rust-v0.1.1", notes: "- n" },
+  ]);
   mocks.summarize.mockImplementation(async (_key, _kv, _product, version) => ({
     bullets: [`summary of ${version}`],
   }));
   mocks.fetchVideoFeed.mockResolvedValue([]);
+  mocks.fetchOpenAiNews.mockResolvedValue([]);
+  mocks.fetchNewsListSlugs.mockResolvedValue({ slugs: new Set<string>(), via: "fetch" });
+  mocks.fetchDevPosts.mockResolvedValue([]);
   mocks.isShort.mockResolvedValue(false);
   mocks.digestVideo.mockResolvedValue({ tier: "normal", bullets: ["a fact"] });
+  mocks.groupVideos.mockImplementation(async (_key, _kv, _label, videos: { title: string }[]) =>
+    videos.map((v) => ({ title: v.title, tier: "normal", videos: [v] })),
+  );
+  mocks.findPostedMessage.mockResolvedValue(null);
 });
 
 interface FakeKv {

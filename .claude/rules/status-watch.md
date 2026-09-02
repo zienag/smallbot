@@ -30,6 +30,6 @@ Subs live in `status_subs:<incident id>` keys — webhook is their only writer, 
 
 ## Its own `*/5` cron
 
-Deliberately *outside* `runPipeline`: the two schedules coincide every 15 minutes, and two invocations racing on one KV key would double-post an update. `STATUS_CRON` in src/index.ts must match the string in wrangler.jsonc — they're matched literally, and a drift silently kills the channel (the slow tick doesn't carry status).
+Deliberately *outside* `runPipeline`: the schedules coincide every 15 minutes, and two invocations racing on one KV key would double-post an update. `STATUS_CRON` in src/crons.ts must match the string in wrangler.jsonc — the three crons are dispatched by their literal strings (`groupForCron`), and a drifted one logs `unknown cron` every tick and runs nothing, which kills the channel until the strings agree again.
 
 It posts via `TELEGRAM_STATUS_BOT_TOKEN` (secret), not Bipozavr — the bot that owns the card is the bot whose webhook gets the Follow callbacks, so the status bot must be an admin of the channel (post + edit; edit is what allows pinning).
