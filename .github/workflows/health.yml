@@ -1,0 +1,48 @@
+name: Health
+
+# The cheap half of self-repair: no model, no session — a curl every half hour.
+# A source dark for an hour becomes one open issue labeled `health`, and that
+# issue is what starts the "smallbot health" cloud routine (a GitHub webhook
+# trigger on issues opened). While the issue is open nothing else fires; when
+# /health is green again the issue is closed here. docs/operations.md.
+on:
+  schedule:
+    - cron: "*/30 * * * *"
+  workflow_dispatch:
+
+permissions:
+  issues: write
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Keep one open issue while /health is red
+        env:
+          GH_TOKEN: ${{ github.token }}
+          HEALTH_URL: https://smallbot.zienag.workers.dev/health
+          # Ticks are 15 minutes apart; four failures is an hour, not a blip.
+          FAILURES_BEFORE_ISSUE: 4
+        run: |
+          set -eu
+          health=$(curl -sf --max-time 20 "$HEALTH_URL") \
+            || health='{"ok":false,"failing":{"worker":{"failures":99,"error":"/health unreachable","since":0}}}'
+          echo "$health"
+          ok=$(echo "$health" | jq -r '.ok')
+          worst=$(echo "$health" | jq -r '[.failing[]?.failures // 99] | max // 0')
+          open=$(gh issue list --repo "$GITHUB_REPOSITORY" --label health --state open --json number -q '.[0].number // empty')
+          if [ "$ok" = "true" ]; then
+            if [ -n "$open" ]; then
+              gh issue close "$open" --repo "$GITHUB_REPOSITORY" --comment "/health is green again."
+            fi
+            exit 0
+          fi
+          if [ -n "$open" ] || [ "$worst" -lt "$FAILURES_BEFORE_ISSUE" ]; then
+            exit 0
+          fi
+          gh label create health --repo "$GITHUB_REPOSITORY" --color d73a4a \
+            --description "opened by the Health workflow; starts the health routine" 2>/dev/null || true
+          title="Sources failing: $(echo "$health" | jq -r '.failing | keys | join(", ")')"
+          body=$(printf 'Opened by the Health workflow from `/health` at %s. The health routine takes it from here.\n\n```json\n%s\n```\n' \
+            "$(date -u +%FT%TZ)" "$(echo "$health" | jq .)")
+          gh issue create --repo "$GITHUB_REPOSITORY" --label health --title "$title" --body "$body"
