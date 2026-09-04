@@ -8,7 +8,7 @@ POST-only, auth via `Authorization: Bearer <TRIGGER_SECRET>` (never a query para
 |---|---|
 | *(none)* | normal pipeline, all sources except status |
 | `version=X` | force-post one version (never touches KV) |
-| `source=claude\|codex\|models\|openai\|blog\|openai_blog\|openai_dev\|youtube\|status` | which source the forced version/id/title/url-substring belongs to |
+| `source=claude\|codex\|models\|openai\|blog\|openai_blog\|openai_hn\|openai_dev\|youtube\|status` | which source the forced version/id/title/url-substring belongs to |
 | `only=status` | run just the status tick (what the `*/5` cron does) |
 | `dry=1\|0` | override `DRY_RUN` |
 | `preview=1` | with `source=`+`version=`: deliver the force-posted message to the owner's DM (`TELEGRAM_OWNER_CHAT_ID`) instead of the channel — real Telegram rendering, no archive entry, no pin |
@@ -21,6 +21,30 @@ curl -X POST "https://smallbot.zienag.workers.dev/run?version=2.1.209&dry=1" \
 ```
 
 Dry responses carry the post text for every source except `claude`/`codex`, where the body is just `force-posted <source> <version> (dry)` and the post itself goes to `console.log` (i.e. `wrangler tail`).
+
+## `/health` — who is failing, since when
+
+GET, no auth (it names sources and carries their error lines, nothing that can post or read the archive):
+
+```sh
+/usr/bin/curl -s https://smallbot.zienag.workers.dev/health
+# {"ok":false,"failing":{"youtube_claude":{"failures":10,"error":"Error: youtube feed fetch failed: 404 UCV03…","since":1788580200000}},"at":"…"}
+```
+
+Every source's outcome is scored per tick in KV (`source_health:<anthropic|openai|status>`, one key per cron so coinciding ticks never overwrite each other; src/health.ts): consecutive failures, the latest error, when the run began. A healthy source has no entry, a dry run keeps no score.
+
+**The owner is never messaged.** He asked for a pipeline that finds and fixes its own misses, not one that asks him to watch it — a DM "source X is down" only moves the watching onto him (tried 2026-09-04, removed the same morning). Two things read `/health` instead:
+
+- **Every Claude Code session in this repo** starts by reading it (SessionStart hook in .claude/settings.json), so a source that has been dark is the first thing the session sees, and it investigates and fixes before anything else.
+- **The "smallbot health" routine** (claude.ai/code/routines) — a cloud Claude session every 6 hours (`27 */6 * * *` UTC, Opus 5, no connectors, repo only) that reads `/health`, tells our breakage from their outage with a known-good control, fixes ours with the smallest change plus a test, runs the gates and pushes one commit to main. It never touches post formats, prompts, wiring or KV, never force-posts, never opens a PR; what it cannot settle it leaves for the next local session. Its first run (2026-09-04) diagnosed the YouTube outage correctly and then pushed a mobile notification to the owner anyway — `PushNotification` is now in its `disallowed_tools` and the prompt says outright that he is never contacted.
+
+First check whether the failure is theirs: on 2026-09-04 `youtube.com/feeds/videos.xml` answered 404 for every channel on the planet for hours (Google's generic error page, `server: YouTube RSS Feeds server`) — a known-good channel as a control tells our breakage from their outage.
+
+## Deploys ride on `main`
+
+A push to `main` runs the gates and then `wrangler deploy` (.github/workflows/ci.yml, secrets `CLOUDFLARE_API_TOKEN` / `CLOUDFLARE_ACCOUNT_ID` set from the Keychain with `gh secret set`), so the health routine's fixes go live without a laptop. A local `npx wrangler deploy` still works and is still the way to verify a change before pushing; the CI deploy is idempotent over it. D1 migrations are not in CI: apply them by hand (`--remote`) before pushing a schema change, as before.
+
+The tick status itself (`console.log` of every source's one-line result) is only in `npx wrangler tail smallbot`; a `/run?dry=1` shows the same lines on demand.
 
 ## `/archive`
 
@@ -70,6 +94,6 @@ npx wrangler kv key get/put --remote --namespace-id 2254c70148884faa8d27f6fd73e0
 
 Remove the entry from the relevant seen-set. `--remote` is mandatory — without it wrangler hits an empty local simulator ("Value not found"). Prefer the `/run?source=…&version=…&dry=1` hooks — they render the same post without touching KV or the channel.
 
-The keys: `last_posted_version` (claude), `codex_last_posted_version`, `known_models` / `openai_known_models` (JSON id arrays), `openai_blog_seen` (JSON guid array), `anthropic_blog_seen` / `openai_dev_blog_seen` (JSON url arrays), `status_incidents` (JSON incident-id → `{messageId, postedUpdates}`), `status_subs:<incident id>` (JSON chat-id arrays), `youtube_seen:<channel key>` (JSON video-id arrays), `resolved_model` / `resolved_model_sonnet` (24h TTL caches), `http_validators` (JSON url → `{etag, lastModified}` of the feeds polled conditionally: the changelog, the Codex atom, the blog indexes), `openai_unlisted` (JSON guid → epoch ms of the news list's last "not listed" verdict; delete an entry to have the list re-asked at once).
+The keys: `last_posted_version` (claude), `codex_last_posted_version`, `known_models` / `openai_known_models` (JSON id arrays), `openai_blog_seen` (JSON guid array), `anthropic_blog_seen` / `openai_dev_blog_seen` (JSON url arrays), `status_incidents` (JSON incident-id → `{messageId, postedUpdates}`), `status_subs:<incident id>` (JSON chat-id arrays), `youtube_seen:<channel key>` (JSON video-id arrays), `resolved_model` / `resolved_model_sonnet` (24h TTL caches), `http_validators` (JSON url → `{etag, lastModified}` of the feeds polled conditionally: the changelog, the Codex atom, the blog indexes), `openai_unlisted` (JSON guid → epoch ms of the news list's last "not listed" verdict; delete an entry to have the list re-asked at once), `source_health:<anthropic|openai|status>` (JSON source tag → `{failures, error, since}` of the sources currently failing; absent when all is well; merged view at `/health`). The HN watch has no key of its own: what it posts goes into `openai_blog_seen`.
 
 **When you rewind a cursor or a seen-set by hand, delete the feed's entry from `http_validators` too** — otherwise the next tick asks the server "changed since?", gets a 304, and reports `unchanged` instead of replaying what you meant to replay. A plain `/run?dry=1` after a real tick shows the same `unchanged` for the same reason.

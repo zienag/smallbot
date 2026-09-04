@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "printf 'smallbot /health: '; /usr/bin/curl -sf --max-time 10 https://smallbot.zienag.workers.dev/health || echo 'unreachable'"
+          }
+        ]
+      }
+    ]
+  }
+}

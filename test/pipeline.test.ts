@@ -208,6 +208,122 @@ describe("openai news list verdicts", () => {
   });
 });
 
+describe("openai hn watch", () => {
+  const now = Date.now();
+  const hour = 60 * 60 * 1000;
+  const astra = "https://openai.com/index/gpt-6-astra";
+  const story = { title: "GPT-6 Astra", url: `${astra}/`, points: 890, createdAt: now - hour };
+  const env = (kv: FakeKv) =>
+    ({
+      ...feedEnv(kv),
+      TELEGRAM_CHAT_ID: undefined,
+      TELEGRAM_OPENAI_BLOG_CHAT_ID: "@oai",
+      TELEGRAM_OWNER_CHAT_ID: "4242",
+    }) as unknown as Env;
+  const seeded = () => fakeKv({ openai_blog_seen: "[]", openai_dev_blog_seen: "[]", "youtube_seen:openai": "[]" });
+
+  it("posts a front-page article the feed never listed, under the page's own title", async () => {
+    mocks.fetchHnStories.mockResolvedValue([story]);
+    mocks.fetchPageMarkdown.mockResolvedValue("# GPT-6 Astra: A new generation of intelligence | OpenAI\n\nWe're introducing");
+    mocks.digestArticle.mockResolvedValue({ tier: "major", bullets: ["saturates ARC-AGI-3"], minutes: 28 });
+    const kv = seeded();
+
+    const result = await runPipeline(env(kv), { group: "openai" });
+
+    expect(result).toContain("openai_hn: posted GPT-6 Astra: A new generation of intelligence [major, browser, 890 points]");
+    expect(mocks.digestArticle.mock.calls[0][3]).toBe("GPT-6 Astra: A new generation of intelligence");
+    expect(mocks.sendMessage.mock.calls.map((c) => [c[1], c[2]])).toEqual([
+      [
+        "@oai",
+        `<b><a href="${astra}">GPT-6 Astra: A new generation of intelligence</a></b>\n\n• saturates ARC-AGI-3\n\n<i>OpenAI · 28 min read</i>`,
+      ],
+    ]);
+    expect(mocks.pinMessage).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(kv.store.get("openai_blog_seen")!)).toEqual([astra]);
+  });
+
+  it("leaves a page the feed carries to the blog watch, whatever its verdict", async () => {
+    mocks.fetchHnStories.mockResolvedValue([story]);
+    mocks.fetchOpenAiNews.mockResolvedValue([
+      { title: "GPT-6 Astra", link: `${astra}/`, description: "d", guid: astra, published: now - hour, category: "" },
+    ]);
+    mocks.fetchNewsListSlugs.mockResolvedValue({ slugs: new Set(["index/other"]), via: "fetch" });
+    const kv = seeded();
+
+    const result = await runPipeline(env(kv), { group: "openai" });
+
+    expect(result).toContain("openai_hn: nothing new, 1 in the feed");
+    expect(mocks.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("skips what the channel already posted", async () => {
+    mocks.fetchHnStories.mockResolvedValue([story]);
+    const kv = fakeKv({ openai_blog_seen: JSON.stringify([astra]), openai_dev_blog_seen: "[]", "youtube_seen:openai": "[]" });
+
+    expect(await runPipeline(env(kv), { group: "openai" })).toContain("openai_hn: nothing new (1 on HN)");
+    expect(mocks.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it("has nothing to compare against until the blog watch has seeded", async () => {
+    mocks.fetchHnStories.mockResolvedValue([story]);
+    const kv = fakeKv({ openai_dev_blog_seen: "[]", "youtube_seen:openai": "[]" });
+
+    // A dry run seeds nothing, so the seen-set is still missing when the HN watch runs.
+    const result = await runPipeline(env(kv), { group: "openai", dryOverride: true });
+
+    expect(result).toContain("openai_blog: would seed 0 seen (dry)");
+    expect(result).toContain("openai_hn: waiting for the blog watch to seed");
+    expect(mocks.sendMessage).not.toHaveBeenCalled();
+  });
+});
+
+describe("source health", () => {
+  const env = (kv: FakeKv) =>
+    ({
+      ...feedEnv(kv),
+      TELEGRAM_CHAT_ID: undefined,
+      TELEGRAM_CODEX_CHAT_ID: "@codex",
+      TELEGRAM_OWNER_CHAT_ID: "4242",
+    }) as unknown as Env;
+
+  it("scores a run of failures, serves it at /health, and clears it on recovery", async () => {
+    mocks.fetchCodexReleases.mockRejectedValue(new Error("atom fetch failed: 503"));
+    const kv = fakeKv({ codex_last_posted_version: "0.1.0" });
+
+    for (let tick = 1; tick <= 4; tick++) {
+      expect(await runPipeline(env(kv), { group: "openai" })).toBe("codex: failed: Error: atom fetch failed: 503");
+    }
+    expect(mocks.sendMessage).not.toHaveBeenCalled();
+    const score = JSON.parse(kv.store.get("source_health:openai")!);
+    expect(score.codex).toMatchObject({ failures: 4, error: "Error: atom fetch failed: 503" });
+
+    const health = await worker.fetch(new Request("https://w/health"), env(kv));
+    expect(await health.json()).toMatchObject({ ok: false, failing: { codex: { failures: 4 } } });
+
+    mocks.fetchCodexReleases.mockResolvedValue([]);
+    await runPipeline(env(kv), { group: "openai" });
+    expect(kv.store.has("source_health:openai")).toBe(false);
+    const clear = await worker.fetch(new Request("https://w/health"), env(kv));
+    expect(await clear.json()).toMatchObject({ ok: true, failing: {} });
+  });
+
+  it("keeps no score on a dry run", async () => {
+    mocks.fetchCodexReleases.mockRejectedValue(new Error("boom"));
+    const kv = fakeKv({ codex_last_posted_version: "0.1.0" });
+
+    for (let tick = 1; tick <= 5; tick++) await runPipeline(env(kv), { group: "openai", dryOverride: true });
+    expect(kv.store.has("source_health:openai")).toBe(false);
+  });
+
+  it("scores the status tick under its own key", async () => {
+    mocks.fetchIncidents.mockRejectedValue(new Error("statuspage 500"));
+    const kv = fakeKv();
+
+    for (let tick = 1; tick <= 4; tick++) expect(await runStatusTick(statusEnv(kv))).toBe("status: failed: Error: statuspage 500");
+    expect(JSON.parse(kv.store.get("source_health:status")!).status.failures).toBe(4);
+  });
+});
+
 describe("cron dispatch", () => {
   it("runs one company's sources per cron and leaves an unowned cron alone", async () => {
     const kv = fakeKv({ last_posted_version: "1.0.2", codex_last_posted_version: "0.1.0" });
@@ -460,6 +576,9 @@ const mocks = vi.hoisted(() => ({
   fetchIncidents: vi.fn(),
   fetchAllBlogEntries: vi.fn(),
   digestBlogPost: vi.fn(),
+  digestArticle: vi.fn(),
+  fetchPageMarkdown: vi.fn(),
+  fetchHnStories: vi.fn(),
   fetchOpenAiNews: vi.fn(),
   fetchNewsListSlugs: vi.fn(),
   fetchDevPosts: vi.fn(),
@@ -496,6 +615,15 @@ vi.mock("../src/blogs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/blogs")>()),
   fetchAllBlogEntries: mocks.fetchAllBlogEntries,
   digestBlogPost: mocks.digestBlogPost,
+  digestArticle: mocks.digestArticle,
+}));
+vi.mock("../src/browser", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/browser")>()),
+  fetchPageMarkdown: mocks.fetchPageMarkdown,
+}));
+vi.mock("../src/hn", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/hn")>()),
+  fetchHnStories: mocks.fetchHnStories,
 }));
 vi.mock("../src/openai_news", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/openai_news")>()),
@@ -534,6 +662,9 @@ beforeEach(() => {
     bullets: [`summary of ${version}`],
   }));
   mocks.fetchVideoFeed.mockResolvedValue([]);
+  mocks.fetchHnStories.mockResolvedValue([]);
+  mocks.fetchPageMarkdown.mockResolvedValue("# A page\n\ntext");
+  mocks.digestArticle.mockResolvedValue({ tier: "normal", bullets: ["a fact"], minutes: 3 });
   mocks.fetchOpenAiNews.mockResolvedValue([]);
   mocks.fetchNewsListSlugs.mockResolvedValue({ slugs: new Set<string>(), via: "fetch" });
   mocks.fetchDevPosts.mockResolvedValue([]);

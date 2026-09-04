@@ -10,11 +10,13 @@ import {
   formatBlogPost,
   isRecentEntry,
 } from "./blogs";
-import { type BrowserRun, QUICK_ACTION_GAP_MS, fetchPageMarkdown } from "./browser";
+import { type BrowserRun, QUICK_ACTION_GAP_MS, fetchPageMarkdown, markdownTitle } from "./browser";
 import { CHANGELOG_URL, fetchChangelog } from "./changelog";
 import { CODEX_RELEASES_ATOM_URL, fetchCodexReleases } from "./codex";
 import { Validators } from "./conditional";
 import { GROUPS, type Group, groupForCron } from "./crons";
+import { type HealthState, loadAllHealth, loadHealth, recordOutcome, saveHealth } from "./health";
+import { type HnStory, articleCandidates, canonicalArticleUrl, fetchHnStories } from "./hn";
 import {
   KNOWN_MODELS_KEY,
   buildAnnouncements,
@@ -492,13 +494,16 @@ async function watchAnthropicBlogs(
 
 /**
  * Browser first (free), then the model's own fetch (paid), then nothing but the
- * feed's own sentence. A post always goes out, only its depth degrades.
+ * feed's own sentence. A post always goes out, only its depth degrades. A
+ * caller that already rendered the page passes the markdown (null included:
+ * the browser was asked and failed) instead of spending a second quick action.
  */
 async function digestOpenAiArticle(
   env: Env,
   item: NewsItem,
+  markdown?: string | null,
 ): Promise<{ bullets: string[]; tier: Tier; minutes: number | null; via: string }> {
-  const markdown = await fetchPageMarkdown(env.BROWSER, item.link);
+  if (markdown === undefined) markdown = await fetchPageMarkdown(env.BROWSER, item.link);
   if (markdown) {
     const digest = await digestArticle(
       env.ANTHROPIC_API_KEY,
@@ -607,6 +612,72 @@ async function watchOpenAiBlog(env: Env, dryRun: boolean): Promise<string> {
     posted.push(`${item.title} [${tier}, ${via}]`);
   }
   return `openai_blog: posted ${posted.join(" | ")}${skipped}${dryRun ? " (dry)" : ""}`;
+}
+
+const OPENAI_ORIGIN = "https://openai.com";
+const OPENAI_ARTICLE_PREFIX = "/index/";
+// Each one is a browser action or ~7.6¢, and a launch is one page.
+const MAX_HN_POSTS_PER_TICK = 2;
+
+/**
+ * The feed's blind spot. openai.com pages the feed never lists — the GPT-6
+ * Astra launch was one — still reach the front page of Hacker News, so a
+ * front-page article under /index/ that the feed does not carry at all is
+ * posted from here. A page the feed does carry is the blog watch's call, gates
+ * and verdicts included; this watch never overrules it. Runs after the blog
+ * watch so a page the feed lists late is posted once, by the feed.
+ */
+async function watchOpenAiHn(env: Env, dryRun: boolean): Promise<string> {
+  const now = Date.now();
+  const stories = articleCandidates(
+    await fetchHnStories("openai.com", now),
+    OPENAI_ORIGIN,
+    OPENAI_ARTICLE_PREFIX,
+  );
+  const seenRaw = await env.RELEASES.get(OPENAI_BLOG_SEEN_KEY);
+  // The blog watch seeds the seen-set; before that, nothing is known to be new.
+  if (!seenRaw) return "openai_hn: waiting for the blog watch to seed";
+  const seen = new Set(JSON.parse(seenRaw) as string[]);
+  const unseen = stories.filter((s) => !seen.has(s.url));
+  if (unseen.length === 0) return `openai_hn: nothing new (${stories.length} on HN)`;
+  // Only now is the feed worth a second read in the tick.
+  const feed = new Set((await fetchOpenAiNews()).map((i) => canonicalArticleUrl(i.link, OPENAI_ORIGIN)));
+  const missing = unseen.filter((s) => !feed.has(s.url));
+  if (missing.length === 0) return `openai_hn: nothing new, ${unseen.length} in the feed`;
+
+  const posted: string[] = [];
+  for (const [i, story] of missing.slice(0, MAX_HN_POSTS_PER_TICK).entries()) {
+    if (i > 0) await new Promise((r) => setTimeout(r, QUICK_ACTION_GAP_MS));
+    const { post, title, tier, via } = await buildHnArticlePost(env, story);
+    if (dryRun) {
+      console.log(`DRY_RUN: would post [${tier}] from HN:\n${post}`);
+    } else {
+      await sendTiered(env, env.TELEGRAM_OPENAI_BLOG_CHAT_ID!, post, tier);
+      seen.add(story.url);
+      await env.RELEASES.put(OPENAI_BLOG_SEEN_KEY, JSON.stringify([...seen]));
+    }
+    posted.push(`${title} [${tier}, ${via}, ${story.points} points]`);
+  }
+  return `openai_hn: posted ${posted.join(" | ")}${dryRun ? " (dry)" : ""}`;
+}
+
+/** The page names itself: its heading is the title, HN's wording the fallback. */
+async function buildHnArticlePost(
+  env: Env,
+  story: HnStory,
+): Promise<{ post: string; title: string; tier: Tier; via: string }> {
+  const markdown = await fetchPageMarkdown(env.BROWSER, story.url);
+  const title = (markdown && markdownTitle(markdown)) || story.title;
+  const item: NewsItem = {
+    title,
+    link: story.url,
+    description: "",
+    guid: story.url,
+    published: story.createdAt,
+    category: "",
+  };
+  const { bullets, tier, minutes, via } = await digestOpenAiArticle(env, item, markdown);
+  return { post: formatOpenAiBlogPost(item, bullets, minutes), title, tier, via };
 }
 
 // The developer half of openai.com, into the same channel as the news feed.
@@ -1009,6 +1080,39 @@ async function forceOpenAiBlogItem(
   return `openai_blog: force-posted "${item.title}" [${tier}]`;
 }
 
+// Test hook /run?source=openai_hn&version=<openai.com url, or a substring of
+// an HN title or url>, never touches KV. Reports the gates' verdicts alongside.
+async function forceOpenAiHnItem(
+  env: Env,
+  query: string,
+  dryRun: boolean,
+  previewTo?: string,
+): Promise<string> {
+  const now = Date.now();
+  const q = query.toLowerCase();
+  const story: HnStory | undefined = query.startsWith(OPENAI_ORIGIN)
+    ? { title: "", url: canonicalArticleUrl(query, OPENAI_ORIGIN), points: 0, createdAt: now }
+    : articleCandidates(await fetchHnStories("openai.com", now), OPENAI_ORIGIN, OPENAI_ARTICLE_PREFIX).find(
+        (s) => s.title.toLowerCase().includes(q) || s.url.includes(query),
+      );
+  if (!story) return `openai_hn: no story matching ${query}`;
+  const { post, title, tier, via } = await buildHnArticlePost(env, story);
+  if (previewTo) {
+    await sendPreviewTiered(env, post, tier, previewTo);
+    return `openai_hn: previewed "${title}" [${tier}, ${via}]`;
+  }
+  if (dryRun) {
+    const seen = new Set(JSON.parse((await env.RELEASES.get(OPENAI_BLOG_SEEN_KEY)) ?? "[]") as string[]);
+    const inFeed = (await fetchOpenAiNews()).some(
+      (i) => canonicalArticleUrl(i.link, OPENAI_ORIGIN) === story.url,
+    );
+    return `openai_hn: "${title}" tier=${tier} via=${via} seen=${seen.has(story.url)} feed=${inFeed} (dry)\n---\n${post}`;
+  }
+  if (!env.TELEGRAM_OPENAI_BLOG_CHAT_ID) return "openai_hn: no chat configured";
+  await sendTiered(env, env.TELEGRAM_OPENAI_BLOG_CHAT_ID, post, tier);
+  return `openai_hn: force-posted "${title}" [${tier}]`;
+}
+
 // Test hook /run?source=openai_dev&version=<title substring>, never touches KV.
 async function forceDevPost(
   env: Env,
@@ -1117,6 +1221,8 @@ export async function runPipeline(
       return forceOpenAiBlogItem(env, opts.forceVersion, dryRun, previewTo);
     if (opts.source === "openai_dev")
       return forceDevPost(env, opts.forceVersion, dryRun, previewTo);
+    if (opts.source === "openai_hn")
+      return forceOpenAiHnItem(env, opts.forceVersion, dryRun, previewTo);
     if (opts.source === "youtube")
       return forceYouTubeVideo(env, opts.forceVersion, dryRun, previewTo);
     if (opts.source === "status")
@@ -1138,22 +1244,55 @@ export async function runPipeline(
   return statuses.join("\n");
 }
 
-// Sources are isolated: one failing doesn't block the rest (each has its
-// own KV cursor and catches up next tick).
+/**
+ * Runs each source in isolation and keeps the score (src/health.ts). A failure
+ * never blocks the others: each has its own cursor and catches up next tick.
+ * Dry runs keep no score.
+ */
+class SourceRunner {
+  readonly statuses: string[] = [];
+  private readonly loaded: string;
+
+  private constructor(
+    private readonly env: Env,
+    private readonly scope: string,
+    private readonly dryRun: boolean,
+    private readonly health: HealthState,
+  ) {
+    this.loaded = JSON.stringify(health);
+  }
+
+  static async start(env: Env, scope: string, dryRun: boolean): Promise<SourceRunner> {
+    return new SourceRunner(env, scope, dryRun, dryRun ? {} : await loadHealth(env.RELEASES, scope));
+  }
+
+  async run(tag: string, watch: () => Promise<string>): Promise<void> {
+    let error: string | null = null;
+    try {
+      this.statuses.push(await watch());
+    } catch (err) {
+      error = String(err);
+      this.statuses.push(`${tag}: failed: ${err}`);
+    }
+    if (!this.dryRun) recordOutcome(this.health, tag, error, Date.now());
+  }
+
+  async finish(): Promise<string[]> {
+    if (!this.dryRun && JSON.stringify(this.health) !== this.loaded) {
+      await saveHealth(this.env.RELEASES, this.scope, this.health);
+    }
+    return this.statuses;
+  }
+}
+
 async function runGroup(
   env: Env,
   group: Group,
   sources: FeedSource[],
   dryRun: boolean,
 ): Promise<string[]> {
-  const statuses: string[] = [];
-  const run = async (tag: string, watch: () => Promise<string>) => {
-    try {
-      statuses.push(await watch());
-    } catch (err) {
-      statuses.push(`${tag}: failed: ${err}`);
-    }
-  };
+  const runner = await SourceRunner.start(env, group, dryRun);
+  const run = (tag: string, watch: () => Promise<string>) => runner.run(tag, watch);
   // Shared by the tick's conditional fetches; a source that failed before
   // committing leaves its validator staged, and staged is never saved.
   const validators = await Validators.load(env.RELEASES);
@@ -1173,6 +1312,7 @@ async function runGroup(
   }
   if (group === "openai" && env.TELEGRAM_OPENAI_BLOG_CHAT_ID) {
     await run("openai_blog", () => watchOpenAiBlog(env, dryRun));
+    await run("openai_hn", () => watchOpenAiHn(env, dryRun));
     await run("openai_dev", () => watchOpenAiDevBlog(env, dryRun));
   }
   for (const channel of YOUTUBE_CHANNELS) {
@@ -1181,7 +1321,7 @@ async function runGroup(
     await run(`youtube_${channel.key}`, () => watchYouTubeChannel(env, channel, chatId, dryRun));
   }
   await validators.save(env.RELEASES);
-  return statuses;
+  return runner.finish();
 }
 
 /**
@@ -1196,11 +1336,9 @@ export async function runStatusTick(
   if (!env.TELEGRAM_STATUS_CHAT_ID) return "status: no chat configured";
   if (!env.TELEGRAM_STATUS_BOT_TOKEN) return "status: no bot token configured";
   const dryRun = opts.dryOverride ?? env.DRY_RUN === "1";
-  try {
-    return await watchAnthropicStatus(env, dryRun);
-  } catch (err) {
-    return `status: failed: ${err}`;
-  }
+  const runner = await SourceRunner.start(env, "status", dryRun);
+  await runner.run("status", () => watchAnthropicStatus(env, dryRun));
+  return (await runner.finish()).join("\n");
 }
 
 /**
@@ -1260,6 +1398,13 @@ export default {
     }
     if (url.pathname === "/archive" || url.pathname.startsWith("/archive/")) {
       return handleArchive(request, env, url);
+    }
+    // Which sources are failing and since when. Public: it names sources and
+    // carries their error lines, nothing that can post or read the archive.
+    if (url.pathname === "/health") {
+      if (request.method !== "GET") return new Response("method not allowed", { status: 405 });
+      const failing = await loadAllHealth(env.RELEASES);
+      return Response.json({ ok: Object.keys(failing).length === 0, failing, at: new Date().toISOString() });
     }
     if (url.pathname !== "/run") return new Response("not found", { status: 404 });
     if (request.method !== "POST") return new Response("method not allowed", { status: 405 });

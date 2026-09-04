@@ -18,3 +18,23 @@ jobs:
       - run: npm run typecheck
       - run: npx tsc --noEmit -p test
       - run: npm test
+
+  # main is prod: whatever lands there is live within minutes, from a laptop
+  # or from the health routine's cloud session alike. D1 migrations stay a
+  # by-hand step before the push (docs/operations.md).
+  deploy:
+    needs: test
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    concurrency: deploy
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npx wrangler deploy
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}

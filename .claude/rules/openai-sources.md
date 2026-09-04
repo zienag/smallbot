@@ -4,6 +4,7 @@ paths:
   - "src/openai_dev.ts"
   - "src/openai_models.ts"
   - "src/browser.ts"
+  - "src/hn.ts"
 ---
 
 # OpenAI sources
@@ -22,6 +23,23 @@ Reading the list through the browser rung **spends the quick-action slot**, so t
 The RSS carries only a one-sentence `<description>` (no `content:encoded`), and the article page itself is behind a Cloudflare JS challenge, so the text comes from a real browser: `quickAction("markdown")` on the `BROWSER` binding (src/browser.ts — no client library, just the binding and a compatibility date ≥ 2026-03-24), then the same digest prompt as the Anthropic blog watch. Three rungs, each a fallback for the one above, reported by the dry hook and the tick status as `via=`: `browser` (free), `web_fetch` (the model fetches the page itself — `digestArticleByUrl`, ~7.6¢), `feed only` (title+description, tier from `classifyTier`). A post always goes out; only its depth degrades.
 
 The free plan allows **one quick action per 10 seconds**, so the post loop sleeps `QUICK_ACTION_GAP_MS` between items. **Don't replace the browser with a plain fetch** — measured, it holds for minutes and then 403s for ~10 hours; that and the rest of the evidence is in docs/openai-access.md.
+
+## The feed's blind spot → `@openai_blogs` (src/hn.ts, `watchOpenAiHn`)
+
+**The feed does not carry every article.** On 2026-09-03 the GPT-6 Astra launch went up at `openai.com/index/gpt-6-astra` and was listed nowhere a reader of the site's own surfaces could find it: not in `news/rss.xml` (two hours after launch, while the same day's safety overview and Daybreak posts were there), not in the `/backend/articles/` list the newsroom renders, not in any of the 36 sitemaps — only in the homepage's featured block, which is server-rendered HTML behind the challenge. Every earlier launch (GPT-5.5, GPT-5.6, Sora 2, Rosalind) had been in the feed, so nothing in the pipeline could have known. The channel had the YouTube video and the safety overview and not the announcement.
+
+The input that does not depend on OpenAI's CMS is Hacker News: the Algolia index (`hn.algolia.com/api/v1/search_by_date`, public, no key) answers a `query=openai.com` search filtered to `points>=30` and `created_at_i>=` three days back in one request, and the launch was there at 890 points within the hour. Measured over two weeks of openai.com and anthropic.com submissions the bar let through four stories, all launches; customer stories, status pages and policy posts sit under ten points.
+
+Rules, in `watchOpenAiHn`, which runs right after the blog watch on the OpenAI tick:
+
+- Candidates are HN stories whose url is under `openai.com/index/` (`articleCandidates`: https, no query, no trailing slash, the `/xx-XX/` locale segment stripped — people submit what they see), one per page at its best score.
+- Not in `openai_blog_seen` (shared with the blog watch; the HN watch has no seen-set of its own, and a page it posts is thereby known to the feed path, the YouTube companion check and the news list logic). The blog watch seeds that key; until it has, the HN watch posts nothing.
+- **Not in the feed at all.** A page the feed carries is the blog watch's call, gates and verdicts included — the HN watch fills the feed's hole, it never overrules its age gate or the newsroom's list. Because the feed carries every page the site ever published, "absent from the feed" also excludes an old page resubmitted to HN; the feed is asked only once a tick has an unseen candidate.
+- Two per tick, oldest submission first, `QUICK_ACTION_GAP_MS` between them. The page is rendered through the browser and its first heading is the post title (`markdownTitle`; HN's wording is the fallback — submitters shorten titles), then the same browser → `web_fetch` → title-only rungs as the blog watch.
+
+The first real catch was the Astra launch itself, posted by the 22:05 tick on 2026-09-03, an hour after the deploy.
+
+Test hook: `/run?source=openai_hn&version=<openai.com url, or an HN title/url substring>&dry=1` — reports the title the page gave, the rung, and both gates' verdicts (`seen=`, `feed=`).
 
 ## Developer blog → `@openai_blogs` (src/openai_dev.ts)
 

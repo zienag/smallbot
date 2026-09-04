@@ -12,6 +12,12 @@ export interface BrowserRun {
 /** Free plan allows one quick action per 10 seconds; the caller paces the loop. */
 export const QUICK_ACTION_GAP_MS = 10_000;
 
+/** The page's own title — its first heading — when the render carried one. */
+export function markdownTitle(markdown: string): string | null {
+  const title = markdown.match(/^#\s+(.+?)\s*$/m)?.[1].replace(/\s*\|\s*OpenAI$/, "");
+  return title || null;
+}
+
 /** Page as markdown, or null when the render failed (quota, rate, redesign). */
 export async function fetchPageMarkdown(
   browser: BrowserRun,
