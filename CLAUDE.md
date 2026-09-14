@@ -47,6 +47,7 @@ All credentials live in macOS Keychain (never in the repo; `.dev.vars` is genera
 |---|---|---|
 | `anthropic` | `api-key-smallbot` | Anthropic API key |
 | `openai` | `api-key-smallbot` | OpenAI key — only ever reads `/v1/models` (service account `smallbot` in the Default project; the Admin API can mint service accounts, not plain project keys) |
+| `google` | `api-key-smallbot` | YouTube Data API key — worker secret `YOUTUBE_API_KEY`; Google Cloud project `smallbot`, key restricted to that API |
 | `telegram` | `bot-token-smallbot` | Bot token |
 | `smallbot` | `trigger-secret` | `/run` endpoint secret |
 | `smallbot` | `archive-read-secret` | `/archive` read-only token — deliberately not the trigger secret: a leak can read the archive, never post |

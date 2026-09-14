@@ -1,14 +1,20 @@
 import { DIGEST_TASK, TIER_CRITERIA, type Tier } from "./blogs";
+import { type Validators, conditionalFetch } from "./conditional";
 import { structuredFromPrompt } from "./summarize";
 import { escapeHtml, formatInline } from "./telegram";
 
 /**
- * YouTube publishes an atom feed per channel — the 15 newest uploads with full
- * descriptions — and it is the only machine-readable surface the channels
- * have. The feed accepts only the channel id; each handle was resolved once by
- * hand from the channel page's canonical link (@claudeofficial is a squatter —
- * the real Claude channel is @claude). The group names the company whose cron
- * carries the channel and whose blog channel gets the post.
+ * A channel's uploads are read from the YouTube Data API: every channel has
+ * an "uploads" playlist whose id is the channel id with its `UC` prefix
+ * swapped for `UU`, and `playlistItems.list` on it returns the newest uploads
+ * with full descriptions for one quota unit of the 10,000 a project gets per
+ * day. The per-channel atom feed it replaced (`feeds/videos.xml`) has no
+ * quota but 404s for every channel on the planet for hours at a time, every
+ * few days, since years — an outage indistinguishable from our own breakage.
+ * Each handle was resolved once by hand from the channel page's canonical
+ * link (@claudeofficial is a squatter — the real Claude channel is @claude).
+ * The group names the company whose cron carries the channel and whose blog
+ * channel gets the post.
  */
 export const YOUTUBE_CHANNELS = [
   { key: "openai", group: "openai", label: "OpenAI YouTube", channelId: "UCXZCJLdBC09xxGZ6gcdrc6A" },
@@ -26,40 +32,81 @@ export interface Video {
   videoId: string;
   title: string;
   url: string;
-  published: number | null; // epoch ms from <published>
+  published: number | null; // epoch ms the video went public
   description: string;
 }
 
-/** Feed order: newest first. Only the 15 most recent uploads. */
-export function parseVideoFeed(xml: string): Video[] {
+/** As many as the atom feed carried; a launch burst was ten in one minute. */
+const MAX_UPLOADS = 15;
+
+/**
+ * The request URL doubles as the validator key in KV, so the API key travels
+ * in a header, never in the URL.
+ */
+export function uploadsUrl(channelId: string): string {
+  const playlistId = `UU${channelId.slice(2)}`;
+  const params = new URLSearchParams({
+    part: "snippet,contentDetails",
+    playlistId,
+    maxResults: String(MAX_UPLOADS),
+    fields: "etag,items(snippet(title,description,publishedAt),contentDetails(videoId,videoPublishedAt))",
+  });
+  return `https://www.googleapis.com/youtube/v3/playlistItems?${params}`;
+}
+
+interface PlaylistItem {
+  snippet?: { title?: string; description?: string; publishedAt?: string };
+  contentDetails?: { videoId?: string; videoPublishedAt?: string };
+}
+
+/**
+ * Playlist order: newest first. `videoPublishedAt` is when the video went
+ * public; `publishedAt` is when it joined the playlist, which for a scheduled
+ * premiere is earlier — the public date is the one the age gates want.
+ */
+export function parseUploads(json: string): Video[] {
+  const items = (JSON.parse(json) as { items?: PlaylistItem[] }).items ?? [];
   const out: Video[] = [];
-  for (const [, entry] of xml.matchAll(/<entry>([\s\S]*?)<\/entry>/g)) {
-    const field = (name: string) => {
-      const m = entry.match(new RegExp(`<${name}[^>]*>([\\s\\S]*?)</${name}>`));
-      return m?.[1].trim() ?? "";
-    };
-    const videoId = field("yt:videoId");
+  for (const item of items) {
+    const videoId = item.contentDetails?.videoId;
     if (!videoId) continue;
-    const published = Date.parse(field("published"));
+    const published = Date.parse(item.contentDetails?.videoPublishedAt ?? item.snippet?.publishedAt ?? "");
     out.push({
       videoId,
-      title: field("title"),
+      title: item.snippet?.title ?? "",
       url: `https://www.youtube.com/watch?v=${videoId}`,
       published: Number.isNaN(published) ? null : published,
-      description: field("media:description"),
+      description: item.snippet?.description ?? "",
     });
   }
   return out;
 }
 
-export async function fetchVideoFeed(channelId: string): Promise<Video[]> {
-  const res = await fetch(`https://www.youtube.com/feeds/videos.xml?channel_id=${channelId}`);
-  if (!res.ok) throw new Error(`youtube feed fetch failed: ${res.status} ${channelId}`);
-  return parseVideoFeed(await res.text());
+/** Null means 304: the uploads are the ones already processed in full. */
+export async function fetchChannelUploads(
+  apiKey: string,
+  channelId: string,
+  validators?: Validators,
+): Promise<Video[] | null> {
+  const res = await conditionalFetch(uploadsUrl(channelId), validators, { "x-goog-api-key": apiKey });
+  if (res === null) return null;
+  const body = await res.text();
+  if (!res.ok) throw new Error(`youtube api failed: ${res.status} ${apiErrorReason(body)} ${channelId}`);
+  return parseUploads(body);
+}
+
+/** The API's own word for what went wrong (quotaExceeded, keyInvalid, …). */
+function apiErrorReason(body: string): string {
+  try {
+    const err = (JSON.parse(body) as { error?: { errors?: { reason?: string }[]; message?: string } }).error;
+    return err?.errors?.[0]?.reason ?? err?.message ?? "";
+  } catch {
+    return "";
+  }
 }
 
 /**
- * The feed carries no history, but the seen-set alone would still replay
+ * Only the newest uploads are read, but the seen-set alone would still replay
  * whatever YouTube resurfaces; publication date is the second gate, same
  * window as the blog watches. Undated counts as stale.
  */
@@ -190,7 +237,7 @@ export async function groupVideos(
 }
 
 /**
- * The feed does not mark Shorts, but /shorts/<id> answers 200 for one and a
+ * The API does not mark Shorts, but /shorts/<id> answers 200 for one and a
  * redirect to /watch for a regular video — a fact, not a guess. Errors count
  * as "not a Short": the failure mode is a posted promo cut, never a dropped
  * video.

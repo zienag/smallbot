@@ -6,7 +6,7 @@ import { CHANGELOG_URL } from "../src/changelog";
 import { VALIDATORS_KEY, Validators } from "../src/conditional";
 import { ANTHROPIC_CRON, OPENAI_CRON } from "../src/crons";
 import worker, { runPipeline, runStatusTick } from "../src/index";
-import { YOUTUBE_CHANNELS } from "../src/youtube";
+import { YOUTUBE_CHANNELS, uploadsUrl } from "../src/youtube";
 
 describe("release feed", () => {
   it("posts candidates oldest-first and advances the cursor after each post", async () => {
@@ -394,7 +394,7 @@ describe("youtube videos", () => {
     const day = 24 * 60 * 60 * 1000;
     mocks.fetchAllBlogEntries.mockResolvedValue([]);
     const claude = YOUTUBE_CHANNELS.find((c) => c.key === "claude")!;
-    mocks.fetchVideoFeed.mockImplementation(async (channelId: string) =>
+    mocks.fetchChannelUploads.mockImplementation(async (_key: string, channelId: string) =>
       channelId === claude.channelId
         ? [
             { videoId: "vid1", title: "How auto mode works", url: "https://www.youtube.com/watch?v=vid1", published: now - day, description: "d" },
@@ -441,9 +441,48 @@ describe("youtube batches", () => {
   const blogEnv = (kv: FakeKv) =>
     ({ ...feedEnv(kv), TELEGRAM_CHAT_ID: undefined, TELEGRAM_ANTHROPIC_BLOG_CHAT_ID: "@blogs" }) as unknown as Env;
   const feedOf = (videos: unknown[]) =>
-    mocks.fetchVideoFeed.mockImplementation(async (channelId: string) =>
+    mocks.fetchChannelUploads.mockImplementation(async (_key: string, channelId: string) =>
       channelId === claude.channelId ? videos : [],
     );
+
+  it("reads a first run in full, takes a 304 as unchanged, commits only once nothing is left to post", async () => {
+    mocks.fetchAllBlogEntries.mockResolvedValue(null);
+    const url = uploadsUrl(claude.channelId);
+    const uploads = (videos: unknown[]) =>
+      mocks.fetchChannelUploads.mockImplementation(async (_key: string, channelId: string, validators?: Validators) => {
+        if (channelId !== claude.channelId) return [];
+        validators?.stage(url, new Response("", { headers: { etag: '"u1"' } }));
+        return videos;
+      });
+    const kv = fakeKv({ "youtube_seen:anthropic": "[]", anthropic_blog_seen: "[]" });
+
+    uploads([]);
+    expect(await runPipeline(blogEnv(kv))).toContain("youtube_claude: seeded 0 seen");
+    expect(mocks.fetchChannelUploads.mock.calls.filter((c) => c[1] === claude.channelId).at(-1)?.[2]).toBeUndefined();
+
+    mocks.fetchChannelUploads.mockResolvedValue(null);
+    expect(await runPipeline(blogEnv(kv))).toContain("youtube_claude: unchanged");
+    expect(mocks.fetchChannelUploads.mock.calls.filter((c) => c[1] === claude.channelId).at(-1)?.[2]).toBeInstanceOf(Validators);
+
+    // A burst still arriving is judged next tick, so the uploads are re-read.
+    uploads([video("v1", "First", 2 * minute)]);
+    expect(await runPipeline(blogEnv(kv))).toContain("youtube_claude: 1 new, settling");
+    expect(kv.store.has(VALIDATORS_KEY)).toBe(false);
+
+    uploads([video("v1", "First", 10 * minute)]);
+    expect(await runPipeline(blogEnv(kv))).toContain("youtube_claude: posted First [normal]");
+    expect(JSON.parse(kv.store.get(VALIDATORS_KEY)!)).toEqual({ [url]: { etag: '"u1"' } });
+  });
+
+  it("is off without an API key", async () => {
+    mocks.fetchAllBlogEntries.mockResolvedValue(null);
+    const kv = fakeKv({ "youtube_seen:claude": "[]", "youtube_seen:anthropic": "[]", anthropic_blog_seen: "[]" });
+
+    const result = await runPipeline({ ...blogEnv(kv), YOUTUBE_API_KEY: undefined } as Env);
+
+    expect(result).not.toContain("youtube_");
+    expect(mocks.fetchChannelUploads).not.toHaveBeenCalled();
+  });
 
   it("waits out a burst that is still arriving", async () => {
     mocks.fetchAllBlogEntries.mockResolvedValue(null);
@@ -582,7 +621,7 @@ const mocks = vi.hoisted(() => ({
   fetchOpenAiNews: vi.fn(),
   fetchNewsListSlugs: vi.fn(),
   fetchDevPosts: vi.fn(),
-  fetchVideoFeed: vi.fn(),
+  fetchChannelUploads: vi.fn(),
   isShort: vi.fn(),
   digestVideo: vi.fn(),
   groupVideos: vi.fn(),
@@ -636,7 +675,7 @@ vi.mock("../src/openai_dev", async (importOriginal) => ({
 }));
 vi.mock("../src/youtube", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/youtube")>()),
-  fetchVideoFeed: mocks.fetchVideoFeed,
+  fetchChannelUploads: mocks.fetchChannelUploads,
   isShort: mocks.isShort,
   digestVideo: mocks.digestVideo,
   groupVideos: mocks.groupVideos,
@@ -661,7 +700,7 @@ beforeEach(() => {
   mocks.summarize.mockImplementation(async (_key, _kv, _product, version) => ({
     bullets: [`summary of ${version}`],
   }));
-  mocks.fetchVideoFeed.mockResolvedValue([]);
+  mocks.fetchChannelUploads.mockResolvedValue([]);
   mocks.fetchHnStories.mockResolvedValue([]);
   mocks.fetchPageMarkdown.mockResolvedValue("# A page\n\ntext");
   mocks.digestArticle.mockResolvedValue({ tier: "normal", bullets: ["a fact"], minutes: 3 });
@@ -708,6 +747,7 @@ function feedEnv(kv: FakeKv): Env {
     RELEASES: kv,
     TELEGRAM_BOT_TOKEN: "bot-token",
     ANTHROPIC_API_KEY: "api-key",
+    YOUTUBE_API_KEY: "yt-key",
     TRIGGER_SECRET: "secret",
     TELEGRAM_CHAT_ID: "@claude",
     DRY_RUN: "0",

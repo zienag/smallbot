@@ -66,6 +66,7 @@ Needs Node 22+ (wrangler's requirement).
    npx wrangler secret put ANTHROPIC_API_KEY
    npx wrangler secret put TRIGGER_SECRET   # long random string; guards the manual POST /run trigger
    npx wrangler secret put OPENAI_API_KEY   # optional; only reads /v1/models, for the OpenAI model watch
+   npx wrangler secret put YOUTUBE_API_KEY  # optional; a YouTube Data API v3 key, for the channel watches
    ```
 
 4. `npx wrangler deploy`. On first run the changelog sources post their newest

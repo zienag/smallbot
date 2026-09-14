@@ -1,16 +1,52 @@
 import { readFileSync } from "node:fs";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { Validators } from "../src/conditional";
 import {
   companionArticle,
   companionLine,
+  fetchChannelUploads,
   formatRoundupPost,
   formatVideoPost,
   groupVideos,
   isRecentVideo,
   isSettled,
   normalizeUrl,
-  parseVideoFeed,
+  parseUploads,
+  uploadsUrl,
 } from "../src/youtube";
+
+describe("fetchChannelUploads", () => {
+  const channelId = "UCV03SRZXJEz-hchIAogeJOg";
+  const fetchMock = vi.fn();
+  vi.stubGlobal("fetch", fetchMock);
+  afterEach(() => fetchMock.mockReset());
+
+  it("asks the uploads playlist with the key in a header, never in the url", async () => {
+    fetchMock.mockResolvedValue(new Response(fixture, { status: 200 }));
+    const videos = await fetchChannelUploads("secret-key", channelId);
+
+    expect(videos).toHaveLength(15);
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect(url).toBe(uploadsUrl(channelId));
+    expect(url).toContain("playlistId=UUV03SRZXJEz-hchIAogeJOg");
+    expect(url).not.toContain("secret-key");
+    expect((init.headers as Record<string, string>)["x-goog-api-key"]).toBe("secret-key");
+  });
+
+  it("takes a 304 as unchanged", async () => {
+    fetchMock.mockResolvedValue(new Response(null, { status: 304 }));
+    expect(await fetchChannelUploads("k", channelId, Validators.empty())).toBeNull();
+  });
+
+  it("names the API's reason when it refuses", async () => {
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ error: { code: 403, errors: [{ reason: "quotaExceeded" }] } }), { status: 403 }),
+    );
+    await expect(fetchChannelUploads("k", channelId)).rejects.toThrow(
+      "youtube api failed: 403 quotaExceeded UCV03SRZXJEz-hchIAogeJOg",
+    );
+  });
+});
 
 describe("isSettled", () => {
   const now = Date.now();
@@ -100,26 +136,32 @@ describe("groupVideos", () => {
 const structured = vi.hoisted(() => vi.fn());
 vi.mock("../src/summarize", () => ({ structuredFromPrompt: structured }));
 
-describe("parseVideoFeed", () => {
-  const videos = parseVideoFeed(fixture);
+describe("parseUploads", () => {
+  const videos = parseUploads(fixture);
 
-  it("takes every entry, newest first, with the watch url", () => {
+  it("takes every item, newest first, with the watch url and the public date", () => {
     expect(videos).toHaveLength(15);
-    expect(videos[0].videoId).toBe("RyjROxHLi_g");
-    expect(videos[0].url).toBe("https://www.youtube.com/watch?v=RyjROxHLi_g");
-    expect(videos[0].published).toBe(Date.parse("2026-08-08T14:00:10+00:00"));
+    expect(videos[0].videoId).toBe("PQGxYvkMobQ");
+    expect(videos[0].url).toBe("https://www.youtube.com/watch?v=PQGxYvkMobQ");
+    expect(videos[0].published).toBe(Date.parse("2026-09-14T19:29:19Z"));
   });
 
-  it("carries the full media description", () => {
-    const video = videos.find((v) => v.videoId === "b8SV4U6fEIc")!;
-    expect(video.title).toBe("How auto mode works with Claude Code");
-    expect(video.description).toContain("Auto mode lets Claude Code");
-    expect(video.description).toContain("0:00 Intro");
+  it("carries the full description", () => {
+    const video = videos.find((v) => v.videoId === "T_wTfrmsThg")!;
+    expect(video.title).toBe("Fable 5.1 is here");
+    expect(video.description).toContain("checks every number");
+  });
+
+  it("prefers the date the video went public over the date it joined the playlist", () => {
+    const item = (published: object) =>
+      JSON.stringify({ items: [{ snippet: { title: "t", publishedAt: "2026-09-01T00:00:00Z" }, contentDetails: { videoId: "v", ...published } }] });
+    expect(parseUploads(item({ videoPublishedAt: "2026-09-02T00:00:00Z" }))[0].published).toBe(Date.parse("2026-09-02T00:00:00Z"));
+    expect(parseUploads(item({}))[0].published).toBe(Date.parse("2026-09-01T00:00:00Z"));
   });
 });
 
 describe("isRecentVideo", () => {
-  const video = parseVideoFeed(fixture)[0];
+  const video = parseUploads(fixture)[0];
 
   it("passes a fresh video and rejects the same one a fortnight on", () => {
     expect(isRecentVideo(video, video.published! + 1000)).toBe(true);
@@ -154,4 +196,4 @@ describe("formatVideoPost", () => {
   });
 });
 
-const fixture = readFileSync("test/fixtures-youtube.atom", "utf8");
+const fixture = readFileSync("test/fixtures-youtube.json", "utf8");

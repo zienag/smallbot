@@ -1,0 +1,170 @@
+{
+  "etag": "BWUCYCfc-gZ5_fvmalzszWDxrYQ",
+  "items": [
+    {
+      "snippet": {
+        "publishedAt": "2026-09-14T19:29:19Z",
+        "title": "How data retention works when using Claude",
+        "description": "Starting with Claude Fable 5, the last thirty days of prompts and Claude’s outputs are stored for safety monitoring. Learn why this window exists, who can read it, and what Enterprise Frontier Safeguards (EFS) changes for organizations.\n\nRead the announcement and request access to EFS: https://www.anthropic.com/news/enterprise-frontier-safeguards\n\nHow Claude Code uses your data: https://code.claude.com/docs/en/data-usage"
+      },
+      "contentDetails": {
+        "videoId": "PQGxYvkMobQ",
+        "videoPublishedAt": "2026-09-14T19:29:19Z"
+      }
+    },
+    {
+      "snippet": {
+        "publishedAt": "2026-09-09T18:29:46Z",
+        "title": "Why Claude works better inside Slack",
+        "description": "Anthropic engineers on why Claude Tag makes better decisions with more context."
+      },
+      "contentDetails": {
+        "videoId": "wcBoFbvFxmc",
+        "videoPublishedAt": "2026-09-09T18:29:46Z"
+      }
+    },
+    {
+      "snippet": {
+        "publishedAt": "2026-09-08T20:22:10Z",
+        "title": "How founders build on Claude Managed Agents",
+        "description": "We sat down with three founders to chat about what they learned building and scaling agents with Claude Managed Agents. Wispr shipped the first version of their meeting assistant in a day and scaled it in a few weeks. Actively built a cross-account sales agent in two weeks. Pendo’s analytics platform now reads customers' codebases and suggests fixes.\n\nThey get into verifying agent work with outcomes, running memory in production, sandboxing, evals, cost, and deciding what to build yourself.\n\nLearn more about Claude Managed Agents: https://platform.claude.com/docs/en/managed-agents/overview"
+      },
+      "contentDetails": {
+        "videoId": "hm8NzEd5io0",
+        "videoPublishedAt": "2026-09-08T20:22:10Z"
+      }
+    },
+    {
+      "snippet": {
+        "publishedAt": "2026-09-08T19:42:10Z",
+        "title": "Anthropic engineers on what Claude changed for them",
+        "description": "Three Anthropic engineers on how coding with Claude changes the job. What gets faster, what they miss, and where their attention goes now."
+      },
+      "contentDetails": {
+        "videoId": "jRPn3iG_e5g",
+        "videoPublishedAt": "2026-09-08T19:42:10Z"
+      }
+    },
+    {
+      "snippet": {
+        "publishedAt": "2026-09-02T19:07:15Z",
+        "title": "How the Claude Code team uses Claude Code",
+        "description": "A year ago, using Claude Code meant prompting, giving feedback, and accepting permission prompts. What does it look like now?\nThariq Shihipar, Sid Bidasaria, and Robert Boyce on the Claude Code team share how they use Claude Code in their day-to-day work, including why they do most of their coding through Claude Tag, why they give Claude goals rather than tasks, and why they delete harness features as the models outgrow them. They trace how the product expanded from the terminal into a multi-surface tool that incorporates primitives like auto mode, workflows, and routines. They also share what they miss most about their work as developers pre-Claude Code.\n\n0:00 Intro\n0:35 - Working through Claude Tag: from tool calls to goals\n2:17 - Building on technology that evolves every two months\n4:48 - How the Claude Code team uses Claude Code: AskUserQuestion, artifacts, and Claude Tag\n6:41 - Running loops and routines remotely\n8:52 - How code review inspired dynamic workflows\n14:04 - Building Claude Tag with Claude Tag: verification and feedback loops in Slack\n18:37 - What they miss about the old way of software engineering\n\nGet started with Claude Code: https://code.claude.com/docs/en/overview\n\nFollow ClaudeDevs on X for product updates and best practices from the Claude Code team: https://x.com/ClaudeDevs"
+      },
+      "contentDetails": {
+        "videoId": "S-sYlFiGFv8",
+        "videoPublishedAt": "2026-09-02T19:07:15Z"
+      }
+    },
+    {
+      "snippet": {
+        "publishedAt": "2026-09-02T19:03:35Z",
+        "title": "Fable 5.1 is here",
+        "description": "Better judgment on every task. Fable 5.1 writes plainly, checks every number, and shows its sources. Included with Max."
+      },
+      "contentDetails": {
+        "videoId": "T_wTfrmsThg",
+        "videoPublishedAt": "2026-09-02T19:03:35Z"
+      }
+    },
+    {
+      "snippet": {
+        "publishedAt": "2026-09-01T18:23:30Z",
+        "title": "Debugging across the whole stack with Claude Fable 5.1",
+        "description": "Claude Fable 5.1 is particularly strong on long-running engineering work, and it's smart enough to fix the root cause of an issue rather than the symptoms.\n\nIn this example, Fable 5.1 works through months of vehicle data, support tickets, and several codebases at once to track down a bug the team couldn't reproduce internally. It proposes a cause, and the developer confirms it, decides what's safe to ship, and approves the fix.\n\nMore on Claude Fable 5.1: https://www.anthropic.com/claude/fable"
+      },
+      "contentDetails": {
+        "videoId": "jwztQLH76is",
+        "videoPublishedAt": "2026-09-01T18:23:30Z"
+      }
+    },
+    {
+      "snippet": {
+        "publishedAt": "2026-09-01T18:23:27Z",
+        "title": "Claude Fable 5.1 builds the ops review in Slack",
+        "description": "Claude Fable 5.1 can take a job from a folder of raw data to a finished deck, and it checks the numbers as it goes.\n\nIn this example, a team puts together an ops review for leadership in Slack, using Claude Tag. Fable 5.1 builds the deck from the team's inputs. Partway through, it catches a number that doesn't reconcile, flags it, and reworks the calculation once someone weighs in. The team reviews the deck together before it goes to leadership.\n\nMore on Claude Fable 5.1: https://www.anthropic.com/claude/fable"
+      },
+      "contentDetails": {
+        "videoId": "G3vwVsh9RtU",
+        "videoPublishedAt": "2026-09-01T18:23:27Z"
+      }
+    },
+    {
+      "snippet": {
+        "publishedAt": "2026-09-01T18:23:23Z",
+        "title": "Claude Fable 5.1 runs the forecast overnight",
+        "description": "Claude Fable 5.1 can build a forecast from raw data on its own, and it checks its numbers as it goes.\n\nIn this example, one person at a B2B company maintains the revenue forecast for a business with a mix of contract and consumption revenue. Claude updates the forecast overnight, running unattended on our API. In the morning, the analyst asks how accurate past forecasts have been, and Claude backtests itself on the spot. The analyst reviews and approves before anything goes out.\n\nMore on Claude Fable 5.1: https://www.anthropic.com/claude/fable"
+      },
+      "contentDetails": {
+        "videoId": "S9IJ1GgAAxE",
+        "videoPublishedAt": "2026-09-01T18:23:23Z"
+      }
+    },
+    {
+      "snippet": {
+        "publishedAt": "2026-09-01T18:23:20Z",
+        "title": "Claude turns flight data into \"look behind you\"",
+        "description": "Claude built a Mac app that tells you when to look up, and where. Type your address, sketch the trees and rooftops around your yard, and it watches the live air traffic overhead, does the physics (including how long the sound takes to reach you), and counts you down out loud: \"Look east... in view in five, four, three...\" A plane only counts if it will actually clear your treeline; one hidden behind your house gets \"listen,\" not \"look.\" Every aircraft on screen is real, live traffic.\n\nThe data:\n- Live aircraft positions: crowd-sourced ADS-B via the community aggregators adsb.lol and adsb.fi, the public radio broadcasts every transponder-equipped aircraft transmits\n- Flight routes: adsb.lol's community route database\n- Ground elevation: Open-Meteo\n- Geocoding, maps, and the voice: Apple's on-device frameworks\n\nThanks to the volunteer ADS-B community, thousands of hobbyist antennas, for keeping this data open to everyone."
+      },
+      "contentDetails": {
+        "videoId": "NkJPtSLLDLs",
+        "videoPublishedAt": "2026-09-01T18:23:20Z"
+      }
+    },
+    {
+      "snippet": {
+        "publishedAt": "2026-09-01T18:23:17Z",
+        "title": "Claude codes turn-by-turn directions for the Moon",
+        "description": "Claude built a working navigation app for the Moon from scratch. It plans drives over real NASA terrain, steering around craters too steep to enter, cutting across ones shallow enough to drive, and explaining every turn, all on a hand-built 3D globe in the browser with no libraries.\n\nEvery number on screen comes from public, freely available data:\n- Terrain and crater depths: NASA's LOLA laser altimeter aboard the Lunar Reconnaissance Orbiter (NASA PDS)\n- Imagery: the LROC camera's global mosaic, via NASA's Scientific Visualization Studio (NASA/GSFC/Arizona State University)\n- Place names: the Gazetteer of Planetary Nomenclature (IAU/USGS)\n- Landing sites: published NASA mission coordinates\n\nAll US-government public domain. Thanks to the LRO, LOLA, and LROC teams and the USGS Astrogeology Science Center for making this data open to everyone."
+      },
+      "contentDetails": {
+        "videoId": "KcRcbHxeoKk",
+        "videoPublishedAt": "2026-09-01T18:23:17Z"
+      }
+    },
+    {
+      "snippet": {
+        "publishedAt": "2026-09-01T18:23:14Z",
+        "title": "Claude codes a watercolor engine",
+        "description": "Claude built a working watercolor simulator from scratch. It computes how water moves, how pigment settles, and how light mixes color, all live in the browser with no libraries."
+      },
+      "contentDetails": {
+        "videoId": "3TJ9vWl0Ewo",
+        "videoPublishedAt": "2026-09-01T18:23:14Z"
+      }
+    },
+    {
+      "snippet": {
+        "publishedAt": "2026-09-01T18:23:11Z",
+        "title": "Claude designs proteins that bind in the lab",
+        "description": "Claude designed new proteins from scratch, and the lab confirmed they work. Given a target and 24 hours on its own, it generated, folded, and scored them using open-source biomolecular models, checked their diversity and novelty with bioinformatics tools, and chose the designs most likely to grip the target. Those designs were then made and measured by two independent labs, Adaptyv Bio and GenScript. Across the 12 targets shown, nearly half of Claude's designs bound, and most targets got a high-affinity binder.\n\nWhat you're watching: A co-folding diffusion trajectory rendered by Claude for a validated binder against each of 12 targets. Every protein on screen is one confirmed to bind experimentally."
+      },
+      "contentDetails": {
+        "videoId": "Rfhb8EzILmM",
+        "videoPublishedAt": "2026-09-01T18:23:11Z"
+      }
+    },
+    {
+      "snippet": {
+        "publishedAt": "2026-09-01T18:23:06Z",
+        "title": "Claude turns calculus into combustion",
+        "description": "Claude built a working car engine from scratch, out of equations. It computes how the fuel burns, how pressure pushes the pistons, and how the exhaust pulses become sound, all live in the browser with no libraries. The calculus is on screen: the area inside the engine's pressure loop is the work of every cycle, integrated live."
+      },
+      "contentDetails": {
+        "videoId": "h3410gcCp50",
+        "videoPublishedAt": "2026-09-01T18:23:06Z"
+      }
+    },
+    {
+      "snippet": {
+        "publishedAt": "2026-09-01T18:23:01Z",
+        "title": "Claude codes a sentence traveling through a brain",
+        "description": "Claude built an interactive model of the human brain from scratch. It sculpts every fold of the cortex in code, then follows one sentence, \"Could you pass the salt?\", as it moves through: the brainstem at 5 milliseconds, the auditory cortex at 20, meaning at 400, and finally the frontal lobe deciding what to do about it. All live in the browser, with no scans, models, or downloaded assets. The timings come from published EEG, MEG and intracranial recordings, slowed about a hundredfold so you can watch it happen."
+      },
+      "contentDetails": {
+        "videoId": "PK_twqwWqp4",
+        "videoPublishedAt": "2026-09-01T18:23:01Z"
+      }
+    }
+  ]
+}

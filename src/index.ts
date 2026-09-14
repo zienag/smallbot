@@ -61,7 +61,7 @@ import {
   companionArticle,
   companionLine,
   digestVideo,
-  fetchVideoFeed,
+  fetchChannelUploads,
   formatRoundupPost,
   formatVideoPost,
   groupVideos,
@@ -69,6 +69,7 @@ import {
   isSettled,
   isShort,
   normalizeUrl,
+  uploadsUrl,
   youtubeSeenKey,
 } from "./youtube";
 import {
@@ -110,6 +111,9 @@ export interface Env {
   ANTHROPIC_API_KEY: string;
   // Read-only use: the model list is what tells us OpenAI shipped something.
   OPENAI_API_KEY?: string;
+  // YouTube Data API key restricted to that API; the channel watches are off
+  // without it.
+  YOUTUBE_API_KEY?: string;
   TRIGGER_SECRET: string;
   // Grants archive reads only — deliberately not TRIGGER_SECRET, which can
   // post. Whitespace-separated list, one token per consumer.
@@ -744,11 +748,15 @@ async function watchYouTubeChannel(
   channel: YouTubeChannel,
   chatId: string,
   dryRun: boolean,
+  validators: Validators,
 ): Promise<string> {
   const tag = `youtube_${channel.key}`;
   const seenKey = youtubeSeenKey(channel);
-  const videos = await fetchVideoFeed(channel.channelId);
+  const url = uploadsUrl(channel.channelId);
   const seenRaw = await env.RELEASES.get(seenKey);
+  // A first run has processed nothing yet, so it reads the uploads in full.
+  const videos = await fetchChannelUploads(env.YOUTUBE_API_KEY!, channel.channelId, seenRaw ? validators : undefined);
+  if (videos === null) return `${tag}: unchanged`;
   if (!seenRaw) {
     if (dryRun) return `${tag}: would seed ${videos.length} seen (dry)`;
     await env.RELEASES.put(seenKey, JSON.stringify(videos.map((v) => v.videoId)));
@@ -766,7 +774,10 @@ async function watchYouTubeChannel(
   let skipped = stale.length > 0 ? `, skipped ${stale.length} stale` : "";
   // Oldest first.
   const fresh = unseen.filter((v) => isRecentVideo(v, now)).reverse();
-  if (fresh.length === 0) return `${tag}: nothing new${skipped}`;
+  if (fresh.length === 0) {
+    if (!dryRun) validators.commit(url);
+    return `${tag}: nothing new${skipped}`;
+  }
   // A burst still arriving is judged next tick, whole.
   if (!isSettled(fresh, now)) return `${tag}: ${fresh.length} new, settling${skipped}`;
 
@@ -836,6 +847,9 @@ async function watchYouTubeChannel(
         : `${group.title} (${group.videos.length} videos) [${tier}]`,
     );
   }
+  // Every fresh video went out: the next tick may take a 304 at face value. A
+  // group held by the per-tick cap keeps the uploads re-read.
+  if (!dryRun && groups.length <= MAX_BLOG_POSTS_PER_TICK) validators.commit(url);
   if (shorts > 0) skipped += `, ${shorts} shorts`;
   if (notes.length === 0) return `${tag}: nothing new${skipped}`;
   return `${tag}: posted ${notes.join(" | ")}${skipped}${dryRun ? " (dry)" : ""}`;
@@ -860,9 +874,10 @@ async function forceYouTubeVideo(
   dryRun: boolean,
   previewTo?: string,
 ): Promise<string> {
+  if (!env.YOUTUBE_API_KEY) return "youtube: no api key configured";
   const q = query.toLowerCase();
   for (const channel of YOUTUBE_CHANNELS) {
-    const video = (await fetchVideoFeed(channel.channelId)).find(
+    const video = (await fetchChannelUploads(env.YOUTUBE_API_KEY, channel.channelId))!.find(
       (v) => v.title.toLowerCase().includes(q) || v.videoId === query,
     );
     if (!video) continue;
@@ -1317,8 +1332,8 @@ async function runGroup(
   }
   for (const channel of YOUTUBE_CHANNELS) {
     const chatId = youtubeChatId(env, channel);
-    if (channel.group !== group || !chatId) continue;
-    await run(`youtube_${channel.key}`, () => watchYouTubeChannel(env, channel, chatId, dryRun));
+    if (channel.group !== group || !chatId || !env.YOUTUBE_API_KEY) continue;
+    await run(`youtube_${channel.key}`, () => watchYouTubeChannel(env, channel, chatId, dryRun, validators));
   }
   await validators.save(env.RELEASES);
   return runner.finish();
