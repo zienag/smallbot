@@ -521,6 +521,26 @@ describe("youtube batches", () => {
     expect(JSON.parse(kv.store.get("youtube_seen:claude")!)).toEqual(["v1"]);
   });
 
+  it("joins a video to an article posted earlier in the same tick, though KV still serves the older read", async () => {
+    const article = "https://claude.com/blog/projects-redesigned";
+    mocks.fetchAllBlogEntries.mockResolvedValue([{ url: article, source: "Claude Blog" }]);
+    mocks.digestBlogPost.mockResolvedValue({ title: "Projects redesigned", tier: "normal", bullets: ["a fact"] });
+    feedOf([video("v1", "Projects are now a conversation", 10 * minute, `Read the announcement → ${article}`)]);
+    mocks.findPostedMessage.mockResolvedValue({ messageId: 101, text: "<b>Projects redesigned</b>" });
+    const kv = edgeCachedKv({ "youtube_seen:claude": "[]", "youtube_seen:anthropic": "[]", anthropic_blog_seen: "[]" });
+
+    const result = await runPipeline(blogEnv(kv));
+
+    expect(result).toContain(`youtube_claude: posted Projects are now a conversation → ${article}`);
+    expect(mocks.sendMessage).toHaveBeenCalledTimes(1);
+    expect(mocks.editMessageText).toHaveBeenCalledWith(
+      "bot-token",
+      "@blogs",
+      101,
+      '<b>Projects redesigned</b>\n\n▶ <a href="https://www.youtube.com/watch?v=v1">Projects are now a conversation</a>',
+    );
+  });
+
   it("posts a settled batch as one roundup per topic and a card per lone video", async () => {
     mocks.fetchAllBlogEntries.mockResolvedValue(null);
     const demos = [video("d1", "Demo one", 12 * minute), video("d2", "Demo two", 11 * minute)];
@@ -738,6 +758,20 @@ function fakeKv(init: Record<string, string> = {}): FakeKv {
     },
     async list({ prefix }) {
       return { keys: [...store.keys()].filter((k) => k.startsWith(prefix)).map((name) => ({ name })) };
+    },
+  };
+}
+
+// A key once read keeps answering with that value, as the edge cache does for
+// up to a minute, whatever is written meanwhile.
+function edgeCachedKv(init: Record<string, string> = {}): FakeKv {
+  const kv = fakeKv(init);
+  const cached = new Map<string, string | null>();
+  return {
+    ...kv,
+    async get(key) {
+      if (!cached.has(key)) cached.set(key, await kv.get(key));
+      return cached.get(key) ?? null;
     },
   };
 }

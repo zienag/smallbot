@@ -17,6 +17,7 @@ import { Validators } from "./conditional";
 import { GROUPS, type Group, groupForCron } from "./crons";
 import { type HealthState, loadAllHealth, loadHealth, recordOutcome, saveHealth } from "./health";
 import { type HnStory, articleCandidates, canonicalArticleUrl, fetchHnStories } from "./hn";
+import { readingOwnWrites } from "./kv";
 import {
   KNOWN_MODELS_KEY,
   buildAnnouncements,
@@ -1306,6 +1307,7 @@ async function runGroup(
   sources: FeedSource[],
   dryRun: boolean,
 ): Promise<string[]> {
+  env = { ...env, RELEASES: readingOwnWrites(env.RELEASES) };
   const runner = await SourceRunner.start(env, group, dryRun);
   const run = (tag: string, watch: () => Promise<string>) => runner.run(tag, watch);
   // Shared by the tick's conditional fetches; a source that failed before
