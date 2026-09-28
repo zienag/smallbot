@@ -45,6 +45,7 @@ import {
   findAnnouncement,
   formatNewOpenAiModelsPost,
   listOpenAiModels,
+  pickAnnouncement,
 } from "./openai_models";
 import {
   type DevPost,
@@ -377,20 +378,30 @@ async function buildOpenAiModelsPost(
     // Enrichment only; the ids are the announcement.
     console.log(`openai_models: feed fetch failed, posting ids alone: ${err}`);
   }
-  const found: NewsItem[] = [];
+  const found: { item: NewsItem; picked: boolean }[] = [];
   for (const model of fresh) {
-    const hit = findAnnouncement(model.id, items);
-    if (hit && !found.some((f) => f.link === hit.link)) found.push(hit);
+    let hit = findAnnouncement(model.id, items);
+    let picked = false;
+    if (!hit) {
+      // The pattern reads only names spelled like the id; the model reads the rest.
+      try {
+        hit = await pickAnnouncement(env.ANTHROPIC_API_KEY, env.RELEASES, model.id, items);
+        picked = hit !== null;
+      } catch (err) {
+        console.log(`openai_models: announcement pick failed for ${model.id}: ${err}`);
+      }
+    }
+    if (hit && !found.some((f) => f.item.link === hit.link)) found.push({ item: hit, picked });
     if (found.length === MAX_ANNOUNCEMENTS_PER_POST) break;
   }
   const articles: OpenAiArticle[] = [];
   const vias: string[] = [];
-  for (const [i, item] of found.entries()) {
+  for (const [i, { item, picked }] of found.entries()) {
     // Browser Run's free plan allows one quick action per 10 seconds.
     if (i > 0) await new Promise((r) => setTimeout(r, QUICK_ACTION_GAP_MS));
     const { bullets, via } = await digestOpenAiArticle(env, item);
     articles.push({ item, bullets });
-    vias.push(via);
+    vias.push(picked ? `${via}, picked by model` : via);
   }
   return {
     post: formatNewOpenAiModelsPost(fresh, articles),
