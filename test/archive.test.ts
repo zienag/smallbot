@@ -1,5 +1,7 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
-import { recordAction, readActions, readPhoto } from "../src/archive";
+import { readFileSync } from "node:fs";
+import { afterAll, afterEach, beforeAll, describe, expect, it, vi } from "vitest";
+import { getPlatformProxy } from "wrangler";
+import { findPostedMessage, recordAction, readActions, readPhoto } from "../src/archive";
 import type { Env } from "../src/index";
 import worker from "../src/index";
 
@@ -79,6 +81,38 @@ describe("recordAction / readActions", () => {
   });
 });
 
+describe("findPostedMessage, on the runtime's own D1", () => {
+  const article = "https://www.anthropic.com/claude-sonnet-5-5";
+  const post = `<b><a href="${article}">Introducing Claude Sonnet 5.5</a></b>\n\n• a fact`;
+
+  it("finds the post of a url too long for a LIKE pattern", async () => {
+    await recordAction(local.db, { chat: "@long", kind: "send", messageId: 126, text: post, tier: "major" });
+    await recordAction(local.db, { chat: "@long", kind: "pin", messageId: 126 });
+
+    expect(await findPostedMessage(local.db, "@long", article)).toEqual({ messageId: 126, text: post });
+  });
+
+  it("returns the text of the latest edit, so a second video keeps the first one's line", async () => {
+    const edited = `${post}\n\n▶ <a href="https://www.youtube.com/watch?v=v1">A video</a>`;
+    await recordAction(local.db, { chat: "@edited", kind: "send", messageId: 7, text: post });
+    await recordAction(local.db, { chat: "@edited", kind: "edit", messageId: 7, text: edited });
+
+    expect(await findPostedMessage(local.db, "@edited", article)).toEqual({ messageId: 7, text: edited });
+  });
+
+  it("does not take a longer url or another chat's post for the article", async () => {
+    await recordAction(local.db, { chat: "@other", kind: "send", messageId: 1, text: post });
+    await recordAction(local.db, {
+      chat: "@prefix",
+      kind: "send",
+      messageId: 2,
+      text: `<a href="${article}-launch">Another page</a>`,
+    });
+
+    expect(await findPostedMessage(local.db, "@prefix", article)).toBeNull();
+  });
+});
+
 describe("/archive endpoint", () => {
   it("refuses a missing, wrong, or unconfigured token", async () => {
     const env = archiveEnv(fakeD1());
@@ -138,6 +172,26 @@ describe("/archive endpoint", () => {
 
 afterEach(() => {
   vi.useRealTimers();
+});
+
+/**
+ * The local D1 of the worker runtime, schema from the migration: limits that
+ * live in the engine (a LIKE pattern over 50 bytes is refused) are the ones
+ * production has.
+ */
+const local = {} as { db: D1Database; dispose: () => Promise<void> };
+
+beforeAll(async () => {
+  const proxy = await getPlatformProxy<{ ARCHIVE: D1Database }>({ persist: false });
+  local.db = proxy.env.ARCHIVE;
+  local.dispose = proxy.dispose;
+  const schema = readFileSync("migrations/0001_archive.sql", "utf8").replace(/--.*$/gm, "");
+  const statements = schema.split(";").map((s) => s.trim()).filter(Boolean);
+  await local.db.batch(statements.map((s) => local.db.prepare(s)));
+});
+
+afterAll(async () => {
+  await local.dispose();
 });
 
 interface ActionRow {

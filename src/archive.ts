@@ -129,7 +129,8 @@ export async function readActions(
  * The message that posted `url` in `chat`, with its current text: the send
  * carries the original, a later edit the newest. Null when the archive never
  * saw it — a gap, or a post older than retention — and the caller treats the
- * video as standalone rather than guess at a message id.
+ * video as standalone rather than guess at a message id. The href is matched
+ * with instr: D1 refuses a LIKE pattern over 50 bytes, shorter than most urls.
  */
 export async function findPostedMessage(
   db: D1Database | undefined,
@@ -143,10 +144,10 @@ export async function findPostedMessage(
         `SELECT message_id, text FROM actions
          WHERE chat = ?1 AND kind IN ('send', 'edit') AND text IS NOT NULL AND message_id = (
            SELECT message_id FROM actions
-           WHERE chat = ?1 AND kind = 'send' AND text LIKE ?2 ORDER BY seq DESC LIMIT 1)
+           WHERE chat = ?1 AND kind = 'send' AND instr(text, ?2) > 0 ORDER BY seq DESC LIMIT 1)
          ORDER BY seq DESC LIMIT 1`,
       )
-      .bind(chat, `%href="${url}"%`)
+      .bind(chat, `href="${url}"`)
       .first<{ message_id: number; text: string }>();
     return row ? { messageId: row.message_id, text: row.text } : null;
   } catch (err) {
