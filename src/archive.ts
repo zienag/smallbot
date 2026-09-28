@@ -2,6 +2,8 @@
 // endpoint (issue #2): an outside consumer replays a channel from it instead
 // of re-implementing the pipeline or reading Telegram back.
 
+import { warn } from "./health";
+
 export type ActionKind = "send" | "edit" | "pin" | "unpin";
 
 export interface ArchivePhoto {
@@ -54,7 +56,7 @@ export async function recordAction(db: D1Database | undefined, action: ChannelAc
     }
     await pruneExpired(db);
   } catch (err) {
-    console.log(`archive write failed: ${err}`);
+    warn(`archive write failed: ${err}`);
   }
 }
 
@@ -151,7 +153,7 @@ export async function findPostedMessage(
       .first<{ message_id: number; text: string }>();
     return row ? { messageId: row.message_id, text: row.text } : null;
   } catch (err) {
-    console.log(`archive lookup failed for ${url}: ${err}`);
+    warn(`archive lookup failed for ${url}: ${err}`);
     return null;
   }
 }

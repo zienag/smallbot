@@ -1,10 +1,11 @@
 name: Health
 
 # The cheap half of self-repair: no model, no session — a curl every half hour.
-# A source dark for an hour becomes one open issue labeled `health`, and that
-# issue is what starts the "smallbot health" cloud routine (a GitHub webhook
-# trigger on issues opened). While the issue is open nothing else fires; when
-# /health is green again the issue is closed here. docs/operations.md.
+# A source dark for an hour, or an error a source caught and worked around,
+# becomes one open issue labeled `health`, and that issue is what starts the
+# "smallbot health" cloud routine (a GitHub webhook trigger on issues opened).
+# While the issue is open nothing else fires; when /health is green again the
+# issue is closed here. docs/operations.md.
 on:
   schedule:
     - cron: "*/30 * * * *"
@@ -30,6 +31,7 @@ jobs:
           echo "$health"
           ok=$(echo "$health" | jq -r '.ok')
           worst=$(echo "$health" | jq -r '[.failing[]?.failures // 99] | max // 0')
+          warned=$(echo "$health" | jq -r '.warnings // [] | length')
           open=$(gh issue list --repo "$GITHUB_REPOSITORY" --label health --state open --json number -q '.[0].number // empty')
           if [ "$ok" = "true" ]; then
             if [ -n "$open" ]; then
@@ -37,12 +39,13 @@ jobs:
             fi
             exit 0
           fi
-          if [ -n "$open" ] || [ "$worst" -lt "$FAILURES_BEFORE_ISSUE" ]; then
+          # A warning is an error already caught once: no blip to wait out.
+          if [ -n "$open" ] || { [ "$worst" -lt "$FAILURES_BEFORE_ISSUE" ] && [ "$warned" -eq 0 ]; }; then
             exit 0
           fi
           gh label create health --repo "$GITHUB_REPOSITORY" --color d73a4a \
             --description "opened by the Health workflow; starts the health routine" 2>/dev/null || true
-          title="Sources failing: $(echo "$health" | jq -r '.failing | keys | join(", ")')"
+          title="Sources failing or warning: $(echo "$health" | jq -r '[(.failing | keys[]), (.warnings // [] | .[].source)] | unique | join(", ")')"
           body=$(printf 'Opened by the Health workflow from `/health` at %s. The health routine takes it from here.\n\n```json\n%s\n```\n' \
             "$(date -u +%FT%TZ)" "$(echo "$health" | jq .)")
           gh issue create --repo "$GITHUB_REPOSITORY" --label health --title "$title" --body "$body"

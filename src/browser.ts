@@ -5,6 +5,9 @@
  * actions give us one without the puppeteer client: `quickAction` needs only
  * the binding and a compatibility date of 2026-03-24 or later.
  */
+
+import { warn } from "./health";
+
 export interface BrowserRun {
   quickAction(action: string, options: Record<string, unknown>): Promise<Response>;
 }
@@ -27,12 +30,12 @@ export async function fetchPageMarkdown(
     const res = await browser.quickAction("markdown", { url });
     const body = (await res.json()) as { success?: boolean; result?: string };
     if (!res.ok || !body.success || !body.result) {
-      console.log(`quickAction markdown failed: ${res.status} ${url}`);
+      warn(`quickAction markdown failed: ${res.status} ${url}`);
       return null;
     }
     return body.result;
   } catch (err) {
-    console.log(`quickAction markdown failed: ${err} ${url}`);
+    warn(`quickAction markdown failed: ${err} ${url}`);
     return null;
   }
 }

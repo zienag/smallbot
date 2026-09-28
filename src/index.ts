@@ -15,7 +15,19 @@ import { CHANGELOG_URL, fetchChangelog } from "./changelog";
 import { CODEX_RELEASES_ATOM_URL, fetchCodexReleases } from "./codex";
 import { Validators } from "./conditional";
 import { GROUPS, type Group, groupForCron } from "./crons";
-import { type HealthState, loadAllHealth, loadHealth, recordOutcome, saveHealth } from "./health";
+import {
+  type HealthState,
+  collectingWarnings,
+  loadAllHealth,
+  loadAllWarnings,
+  loadHealth,
+  loadWarnings,
+  mergeWarnings,
+  recordOutcome,
+  saveHealth,
+  saveWarnings,
+  warn,
+} from "./health";
 import { type HnStory, articleCandidates, canonicalArticleUrl, fetchHnStories } from "./hn";
 import { readingOwnWrites } from "./kv";
 import {
@@ -315,7 +327,7 @@ async function postModelsMessage(
         await recordAction(env.ARCHIVE, { chat: chatId, kind: "send", messageId, text: post, photos });
       return;
     } catch (err) {
-      console.log(`album failed, falling back to plain text: ${err}`);
+      warn(`album failed, falling back to plain text: ${err}`);
     }
   }
   const messageId = await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, post);
@@ -376,7 +388,7 @@ async function buildOpenAiModelsPost(
     items = await fetchOpenAiNews();
   } catch (err) {
     // Enrichment only; the ids are the announcement.
-    console.log(`openai_models: feed fetch failed, posting ids alone: ${err}`);
+    warn(`openai_models: feed fetch failed, posting ids alone: ${err}`);
   }
   const found: { item: NewsItem; picked: boolean }[] = [];
   for (const model of fresh) {
@@ -388,7 +400,7 @@ async function buildOpenAiModelsPost(
         hit = await pickAnnouncement(env.ANTHROPIC_API_KEY, env.RELEASES, model.id, items);
         picked = hit !== null;
       } catch (err) {
-        console.log(`openai_models: announcement pick failed for ${model.id}: ${err}`);
+        warn(`openai_models: announcement pick failed for ${model.id}: ${err}`);
       }
     }
     if (hit && !found.some((f) => f.item.link === hit.link)) found.push({ item: hit, picked });
@@ -429,7 +441,7 @@ async function sendTiered(
       await pinMessage(env.TELEGRAM_BOT_TOKEN, chatId, messageId);
       await recordAction(env.ARCHIVE, { chat: chatId, kind: "pin", messageId });
     } catch (err) {
-      console.log(`pin failed in ${chatId}: ${err}`);
+      warn(`pin failed in ${chatId}: ${err}`);
     }
   }
 }
@@ -540,7 +552,7 @@ async function digestOpenAiArticle(
     );
     return { ...digest, via: "web_fetch" };
   } catch (err) {
-    console.log(`openai web_fetch digest failed for ${item.link}: ${err}`);
+    warn(`openai web_fetch digest failed for ${item.link}: ${err}`);
   }
   const tier = await classifyTier(env.ANTHROPIC_API_KEY, env.RELEASES, item);
   return { bullets: [], tier, minutes: null, via: "feed only" };
@@ -946,7 +958,7 @@ async function upsertIncidentCard(
         await pinMessage(token, chatId, newId);
         await recordAction(env.ARCHIVE, { chat: chatId, kind: "pin", messageId: newId });
       } catch (err) {
-        console.log(`pin failed in ${chatId}: ${err}`);
+        warn(`pin failed in ${chatId}: ${err}`);
       }
     }
     return newId;
@@ -961,7 +973,7 @@ async function upsertIncidentCard(
       await unpinMessage(token, chatId, messageId);
       await recordAction(env.ARCHIVE, { chat: chatId, kind: "unpin", messageId });
     } catch (err) {
-      console.log(`unpin failed in ${chatId}: ${err}`);
+      warn(`unpin failed in ${chatId}: ${err}`);
     }
   }
   return messageId;
@@ -1278,6 +1290,7 @@ export async function runPipeline(
  */
 class SourceRunner {
   readonly statuses: string[] = [];
+  private readonly warned: { tag: string; messages: string[] }[] = [];
   private readonly loaded: string;
 
   private constructor(
@@ -1295,18 +1308,28 @@ class SourceRunner {
 
   async run(tag: string, watch: () => Promise<string>): Promise<void> {
     let error: string | null = null;
+    const messages: string[] = [];
     try {
-      this.statuses.push(await watch());
+      this.statuses.push(await collectingWarnings(messages, watch));
     } catch (err) {
       error = String(err);
       this.statuses.push(`${tag}: failed: ${err}`);
     }
+    for (const message of messages) this.statuses.push(`${tag}: warning: ${message}`);
+    if (messages.length > 0) this.warned.push({ tag, messages });
     if (!this.dryRun) recordOutcome(this.health, tag, error, Date.now());
   }
 
   async finish(): Promise<string[]> {
     if (!this.dryRun && JSON.stringify(this.health) !== this.loaded) {
       await saveHealth(this.env.RELEASES, this.scope, this.health);
+    }
+    // Read only by a tick that has something to add: a clean tick pays nothing.
+    if (!this.dryRun && this.warned.length > 0) {
+      const now = Date.now();
+      let warnings = await loadWarnings(this.env.RELEASES, this.scope);
+      for (const { tag, messages } of this.warned) warnings = mergeWarnings(warnings, tag, messages, now);
+      await saveWarnings(this.env.RELEASES, this.scope, warnings);
     }
     return this.statuses;
   }
@@ -1427,12 +1450,15 @@ export default {
     if (url.pathname === "/archive" || url.pathname.startsWith("/archive/")) {
       return handleArchive(request, env, url);
     }
-    // Which sources are failing and since when. Public: it names sources and
-    // carries their error lines, nothing that can post or read the archive.
+    // Which sources are failing and since when, and the errors the healthy
+    // ones caught and worked around. Public: it names sources and carries
+    // their error lines, nothing that can post or read the archive.
     if (url.pathname === "/health") {
       if (request.method !== "GET") return new Response("method not allowed", { status: 405 });
       const failing = await loadAllHealth(env.RELEASES);
-      return Response.json({ ok: Object.keys(failing).length === 0, failing, at: new Date().toISOString() });
+      const warnings = await loadAllWarnings(env.RELEASES, Date.now());
+      const ok = Object.keys(failing).length === 0 && warnings.length === 0;
+      return Response.json({ ok, failing, warnings, at: new Date().toISOString() });
     }
     if (url.pathname !== "/run") return new Response("not found", { status: 404 });
     if (request.method !== "POST") return new Response("method not allowed", { status: 405 });

@@ -1,5 +1,6 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { decodeHTML } from "entities";
+import { warn } from "./health";
 import { BOT_UA, articleText, pageTitle } from "./html";
 import { structuredFromPrompt, summaryFromPrompt } from "./summarize";
 import { escapeHtml, formatInline } from "./telegram";
@@ -278,12 +279,12 @@ export async function buildAnnouncements(
           try {
             photos = await pickImportantImages(apiKey, kv, found.title, await fetchImages(found.images));
           } catch (err) {
-            console.log(`image selection failed for ${model.id}: ${err}`);
+            warn(`image selection failed for ${model.id}: ${err}`);
           }
           press = { url: found.url, title: found.title, bullets: summary.bullets, photos };
         }
       } catch (err) {
-        console.log(`press release lookup failed for ${model.id}: ${err}`);
+        warn(`press release lookup failed for ${model.id}: ${err}`);
       }
     }
     announcements.push({ model, press });

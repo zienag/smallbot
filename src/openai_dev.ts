@@ -1,3 +1,4 @@
+import { warn } from "./health";
 import { buildArticlePost, bulletList } from "./blogs";
 
 /**
@@ -40,7 +41,7 @@ const BOILERPLATE = /^> For the complete documentation index[^\n]*\n/m;
 export async function fetchDevPostText(post: DevPost): Promise<string | null> {
   const res = await fetch(post.mdUrl);
   if (!res.ok) {
-    console.log(`openai dev post fetch failed: ${res.status} ${post.mdUrl}`);
+    warn(`openai dev post fetch failed: ${res.status} ${post.mdUrl}`);
     return null;
   }
   return (await res.text()).replace(BOILERPLATE, "").trim();

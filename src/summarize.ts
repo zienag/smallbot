@@ -1,4 +1,5 @@
 import Anthropic from "@anthropic-ai/sdk";
+import { warn } from "./health";
 
 // Known-good version: both the fallback and the API-surface baseline
 // (adaptive thinking, structured outputs, no sampling params).
@@ -52,7 +53,7 @@ async function resolveModel(client: Anthropic, kv: KVNamespace, family: string):
     await kv.put(cacheKey, model, { expirationTtl: MODEL_CACHE_TTL_S });
     return model;
   } catch (err) {
-    console.log(`models.list failed, using ${FALLBACK_MODEL}: ${err}`);
+    warn(`models.list failed, using ${FALLBACK_MODEL}: ${err}`);
     return FALLBACK_MODEL;
   }
 }

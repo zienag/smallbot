@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Incident } from "../src/status";
 import { STATUS_INCIDENTS_KEY, type StatusState } from "../src/status";
 import type { Env } from "../src/index";
@@ -47,7 +47,8 @@ describe("release feed", () => {
     (env as { ARCHIVE: unknown }).ARCHIVE = { prepare: () => { throw new Error("boom"); } };
     const result = await runPipeline(env);
 
-    expect(result).toBe("claude: posted 1.0.1, 1.0.2");
+    const warning = "claude: warning: archive write failed: Error: boom";
+    expect(result).toBe(`claude: posted 1.0.1, 1.0.2\n${warning}\n${warning}`);
     expect(kv.store.get("last_posted_version")).toBe("1.0.2");
   });
 
@@ -313,6 +314,40 @@ describe("source health", () => {
 
     for (let tick = 1; tick <= 5; tick++) await runPipeline(env(kv), { group: "openai", dryOverride: true });
     expect(kv.store.has("source_health:openai")).toBe(false);
+  });
+
+  it("keeps an error a source caught and worked around, serves it at /health, and lets it expire", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-09-28T18:15:00Z"));
+    mocks.fetchAllBlogEntries.mockResolvedValue([{ url: "https://a.com/news/launch", source: "Anthropic news" }]);
+    mocks.digestBlogPost.mockResolvedValue({ title: "Launch", tier: "major", bullets: ["a fact"] });
+    mocks.pinMessage.mockRejectedValue(new Error("telegram pinChatMessage failed: 400"));
+    const kv = fakeKv({ anthropic_blog_seen: "[]" });
+    const blogs = { ...feedEnv(kv), TELEGRAM_CHAT_ID: undefined, TELEGRAM_ANTHROPIC_BLOG_CHAT_ID: "@blogs" } as unknown as Env;
+
+    const result = await runPipeline(blogs, { group: "anthropic" });
+
+    const message = "pin failed in @blogs: Error: telegram pinChatMessage failed: 400";
+    expect(result).toContain("blog: posted https://a.com/news/launch [major]");
+    expect(result).toContain(`blog: warning: ${message}`);
+    expect(kv.store.has("source_health:anthropic")).toBe(false);
+    const at = Date.parse("2026-09-28T18:15:00Z");
+    const health = await worker.fetch(new Request("https://w/health"), blogs);
+    expect(await health.json()).toMatchObject({
+      ok: false,
+      failing: {},
+      warnings: [{ source: "blog", message, count: 1, since: at, at }],
+    });
+
+    // Clean ticks do not erase it; a day without a repeat does.
+    mocks.fetchAllBlogEntries.mockResolvedValue(null);
+    await runPipeline(blogs, { group: "anthropic" });
+    vi.setSystemTime(new Date("2026-09-29T18:00:00Z"));
+    const later = await worker.fetch(new Request("https://w/health"), blogs);
+    expect(await later.json()).toMatchObject({ ok: false, warnings: [{ source: "blog" }] });
+    vi.setSystemTime(new Date("2026-09-29T18:16:00Z"));
+    const expired = await worker.fetch(new Request("https://w/health"), blogs);
+    expect(await expired.json()).toMatchObject({ ok: true, failing: {}, warnings: [] });
   });
 
   it("scores the status tick under its own key", async () => {
@@ -704,6 +739,10 @@ vi.mock("../src/archive", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/archive")>()),
   findPostedMessage: mocks.findPostedMessage,
 }));
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 beforeEach(() => {
   vi.clearAllMocks();

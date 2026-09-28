@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { type HealthState, loadAllHealth, recordOutcome } from "../src/health";
+import {
+  type HealthState,
+  WARNING_TTL_MS,
+  collectingWarnings,
+  loadAllHealth,
+  mergeWarnings,
+  recordOutcome,
+  warn,
+} from "../src/health";
 
 describe("recordOutcome", () => {
   it("counts a run of failures from its first tick and forgets it on success", () => {
@@ -41,3 +49,67 @@ describe("loadAllHealth", () => {
     });
   });
 });
+
+describe("warnings", () => {
+  it("attributes a warning to the source that was running, though two runs interleave", async () => {
+    const order: string[] = [];
+    const blog: string[] = [];
+    const status: string[] = [];
+    const gate = deferred();
+
+    const first = collectingWarnings(blog, async () => {
+      order.push("blog starts");
+      await gate.promise;
+      warn("pin failed");
+      order.push("blog warns");
+    });
+    const second = collectingWarnings(status, async () => {
+      order.push("status starts");
+      warn("unpin failed");
+      order.push("status warns");
+      gate.resolve();
+    });
+    await Promise.all([first, second]);
+
+    expect(order).toEqual(["blog starts", "status starts", "status warns", "blog warns"]);
+    expect(blog).toEqual(["pin failed"]);
+    expect(status).toEqual(["unpin failed"]);
+  });
+
+  it("is a log line only outside a source's run", () => {
+    expect(() => warn("status webhook failed")).not.toThrow();
+  });
+
+  it("counts a repeat, keeps sources apart, and drops what a day has not repeated", () => {
+    const hour = 60 * 60 * 1000;
+    let kept = mergeWarnings([], "blog", ["pin failed"], 0);
+    kept = mergeWarnings(kept, "youtube_claude", ["pin failed", "archive lookup failed"], hour);
+    kept = mergeWarnings(kept, "blog", ["pin failed"], 2 * hour);
+    expect(kept).toEqual([
+      { source: "youtube_claude", message: "pin failed", count: 1, since: hour, at: hour },
+      { source: "youtube_claude", message: "archive lookup failed", count: 1, since: hour, at: hour },
+      { source: "blog", message: "pin failed", count: 2, since: 0, at: 2 * hour },
+    ]);
+
+    const nextDay = mergeWarnings(kept, "models", ["press release lookup failed"], hour + WARNING_TTL_MS + 1);
+    expect(nextDay.map((w) => w.source)).toEqual(["blog", "models"]);
+  });
+
+  it("keeps the newest twenty", () => {
+    let kept = mergeWarnings([], "blog", [], 0);
+    for (let i = 0; i < 25; i++) kept = mergeWarnings(kept, "blog", [`failure ${i}`], i);
+    expect(kept).toHaveLength(20);
+    expect(kept[0].message).toBe("failure 5");
+    expect(kept[19].message).toBe("failure 24");
+  });
+});
+
+// --- scaffolding ---
+
+function deferred(): { promise: Promise<void>; resolve: () => void } {
+  let resolve = () => {};
+  const promise = new Promise<void>((r) => {
+    resolve = r;
+  });
+  return { promise, resolve };
+}

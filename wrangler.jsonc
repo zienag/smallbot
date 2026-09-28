@@ -3,6 +3,12 @@
   "name": "smallbot",
   "main": "src/index.ts",
   "compatibility_date": "2026-07-01",
+  // AsyncLocalStorage: a caught error is attributed to the source that was
+  // running (src/health.ts).
+  "compatibility_flags": ["nodejs_als"],
+  // Every console.log kept for three days (free plan: 200,000 lines a day),
+  // so a tick can be read after the fact and not only through a live tail.
+  "observability": { "enabled": true },
   // Real browser for openai.com article pages; quickAction needs no client
   // library, only a compatibility date of 2026-03-24 or later.
   "browser": { "binding": "BROWSER" },

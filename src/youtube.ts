@@ -1,5 +1,6 @@
 import { DIGEST_TASK, TIER_CRITERIA, type Tier } from "./blogs";
 import { type Validators, conditionalFetch } from "./conditional";
+import { warn } from "./health";
 import { structuredFromPrompt } from "./summarize";
 import { escapeHtml, formatInline } from "./telegram";
 
@@ -250,7 +251,7 @@ export async function isShort(videoId: string): Promise<boolean> {
     });
     return res.status === 200;
   } catch (err) {
-    console.log(`shorts probe failed for ${videoId}: ${err}`);
+    warn(`shorts probe failed for ${videoId}: ${err}`);
     return false;
   }
 }
