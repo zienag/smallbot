@@ -85,7 +85,8 @@ jobs:
               --description "a miss that raised no error; closed by the health routine" 2>/dev/null || true
             created=$(gh issue create --repo "$GITHUB_REPOSITORY" --label reported \
               --title "Reported miss: $(printf '%s' "$REPORT" | head -1 | cut -c1-80)" --body "$REPORT")
-            echo "$created"
+            # Started by its number: the list below does not show an issue this new.
+            start_for "${created##*/}" "$(printf 'Reported miss, issue #%s in %s:\n%s' "${created##*/}" "$GITHUB_REPOSITORY" "$REPORT")"
           fi
           for n in $(gh issue list --repo "$GITHUB_REPOSITORY" --label reported --state open --json number -q '.[].number'); do
             report=$(gh issue view "$n" --repo "$GITHUB_REPOSITORY" --json body -q '.body')
