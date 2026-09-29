@@ -12,6 +12,11 @@ on:
   schedule:
     - cron: "*/30 * * * *"
   workflow_dispatch:
+    inputs:
+      fire_test:
+        description: Start the routine now, whatever /health says, to check the call
+        type: boolean
+        default: false
 
 permissions:
   issues: write
@@ -29,8 +34,27 @@ jobs:
           ROUTINE_FIRE_URL: https://api.anthropic.com/v1/claude_code/routines/trig_01NRsUECNabtXUdcUS29PMCa/fire
           ROUTINE_FIRE_TOKEN: ${{ secrets.ROUTINE_FIRE_TOKEN }}
           STARTED: Health routine started.
+          FIRE_TEST: ${{ inputs.fire_test }}
         run: |
           set -eu
+          # Prints the HTTP status; the answer's body is left in fire.json.
+          fire() {
+            curl -s -o fire.json -w '%{http_code}' --max-time 30 -X POST "$ROUTINE_FIRE_URL" \
+              -H "Authorization: Bearer $ROUTINE_FIRE_TOKEN" \
+              -H "anthropic-beta: experimental-cc-routine-2026-04-01" \
+              -H "anthropic-version: 2023-06-01" \
+              -H "Content-Type: application/json" \
+              -d "$(jq -n --arg text "$1" '{text: $text}')" || true
+          }
+          answer() {
+            jq -c 'del(.claude_code_session_url)' fire.json 2>/dev/null || true
+          }
+          if [ "$FIRE_TEST" = "true" ]; then
+            code=$(fire "A test of the start call from the Health workflow. No issue is open.")
+            echo "HTTP $code $(answer)"
+            [ "$code" = "200" ]
+            exit
+          fi
           health=$(curl -sf --max-time 20 "$HEALTH_URL") \
             || health='{"ok":false,"failing":{"worker":{"failures":99,"error":"/health unreachable","since":0}}}'
           echo "$health"
@@ -67,14 +91,9 @@ jobs:
             exit 0
           fi
           text=$(printf 'Health issue #%s in %s is open. /health answered:\n%s' "$open" "$GITHUB_REPOSITORY" "$health")
-          code=$(curl -s -o fire.json -w '%{http_code}' --max-time 30 -X POST "$ROUTINE_FIRE_URL" \
-            -H "Authorization: Bearer $ROUTINE_FIRE_TOKEN" \
-            -H "anthropic-beta: experimental-cc-routine-2026-04-01" \
-            -H "anthropic-version: 2023-06-01" \
-            -H "Content-Type: application/json" \
-            -d "$(jq -n --arg text "$text" '{text: $text}')") || code=000
+          code=$(fire "$text")
           if [ "$code" = "200" ]; then
             gh issue comment "$open" --repo "$GITHUB_REPOSITORY" --body "$STARTED"
           else
-            echo "::warning::the routine was not started for #$open: HTTP $code $(jq -c 'del(.claude_code_session_url)' fire.json 2>/dev/null || true)"
+            echo "::warning::the routine was not started for #$open: HTTP $code $(answer)"
           fi
