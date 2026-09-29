@@ -278,6 +278,40 @@ describe("openai hn watch", () => {
   });
 });
 
+describe("openai model watch", () => {
+  const now = Date.now();
+  const hour = 60 * 60 * 1000;
+  const sol = "https://openai.com/index/introducing-gpt-6-1-sol";
+  const env = (kv: FakeKv) =>
+    ({
+      ...feedEnv(kv),
+      TELEGRAM_CHAT_ID: undefined,
+      TELEGRAM_MODELS_CHAT_ID: "@drops",
+      OPENAI_API_KEY: "oai-key",
+    }) as unknown as Env;
+
+  // 2026-09-29: the feed never listed the GPT-6.1 Sol launch, HN had it at 266
+  // points, and the model post went out as the bare id beside the article.
+  it("finds a launch the feed never listed on Hacker News", async () => {
+    mocks.listOpenAiModels.mockResolvedValue([{ id: "gpt-6.1-sol", created: 1790467200 }]);
+    mocks.fetchHnStories.mockResolvedValue([
+      { title: "Dots", url: "https://openai.com/index/introducing-dots/", points: 188, createdAt: now - hour },
+      { title: "GPT 6.1 Sol", url: `${sol}/`, points: 266, createdAt: now - hour },
+    ]);
+    mocks.fetchPageMarkdown.mockResolvedValue("# Introducing GPT‑6.1 Sol | OpenAI\n\nToday we're releasing");
+    mocks.digestArticle.mockResolvedValue({ tier: "major", bullets: ["a fact"], minutes: 9 });
+    const kv = fakeKv({ openai_known_models: "[]" });
+
+    const result = await runPipeline(env(kv), { group: "openai" });
+
+    expect(result).toContain("openai_models: posted gpt-6.1-sol [browser]");
+    expect(mocks.fetchPageMarkdown).toHaveBeenCalledTimes(1);
+    expect(mocks.sendMessage.mock.calls[0][2]).toContain(
+      `<b><a href="${sol}">Introducing GPT‑6.1 Sol</a></b>\n• a fact`,
+    );
+  });
+});
+
 describe("source health", () => {
   const env = (kv: FakeKv) =>
     ({
@@ -681,6 +715,7 @@ const mocks = vi.hoisted(() => ({
   digestVideo: vi.fn(),
   groupVideos: vi.fn(),
   findPostedMessage: vi.fn(),
+  listOpenAiModels: vi.fn(),
 }));
 
 vi.mock("../src/telegram", async (importOriginal) => ({
@@ -723,6 +758,10 @@ vi.mock("../src/openai_news", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/openai_news")>()),
   fetchOpenAiNews: mocks.fetchOpenAiNews,
   fetchNewsListSlugs: mocks.fetchNewsListSlugs,
+}));
+vi.mock("../src/openai_models", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/openai_models")>()),
+  listOpenAiModels: mocks.listOpenAiModels,
 }));
 vi.mock("../src/openai_dev", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/openai_dev")>()),

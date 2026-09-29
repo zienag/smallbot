@@ -58,6 +58,7 @@ import {
   formatNewOpenAiModelsPost,
   listOpenAiModels,
   pickAnnouncement,
+  withHnArticles,
 } from "./openai_models";
 import {
   type DevPost,
@@ -390,6 +391,21 @@ async function buildOpenAiModelsPost(
     // Enrichment only; the ids are the announcement.
     warn(`openai_models: feed fetch failed, posting ids alone: ${err}`);
   }
+  // The feed skips some launches; the HN watch posts those to the blog channel,
+  // and the model post has to find the same article.
+  const fromHn = new Set<string>();
+  try {
+    const stories = articleCandidates(
+      await fetchHnStories("openai.com", Date.now()),
+      OPENAI_ORIGIN,
+      OPENAI_ARTICLE_PREFIX,
+    );
+    const merged = withHnArticles(items, stories, OPENAI_ORIGIN);
+    for (const i of merged) if (!items.includes(i)) fromHn.add(i.link);
+    items = merged;
+  } catch (err) {
+    warn(`openai_models: hn search failed, matching against the feed alone: ${err}`);
+  }
   const found: { item: NewsItem; picked: boolean }[] = [];
   for (const model of fresh) {
     let hit = findAnnouncement(model.id, items);
@@ -408,12 +424,19 @@ async function buildOpenAiModelsPost(
   }
   const articles: OpenAiArticle[] = [];
   const vias: string[] = [];
-  for (const [i, { item, picked }] of found.entries()) {
+  for (const [i, hit] of found.entries()) {
+    let { item } = hit;
     // Browser Run's free plan allows one quick action per 10 seconds.
     if (i > 0) await new Promise((r) => setTimeout(r, QUICK_ACTION_GAP_MS));
-    const { bullets, via } = await digestOpenAiArticle(env, item);
+    let markdown: string | null | undefined;
+    if (fromHn.has(item.link)) {
+      // As in the HN watch: the page's heading is the title, HN's wording the fallback.
+      markdown = await fetchPageMarkdown(env.BROWSER, item.link);
+      item = { ...item, title: (markdown && markdownTitle(markdown)) || item.title };
+    }
+    const { bullets, via } = await digestOpenAiArticle(env, item, markdown);
     articles.push({ item, bullets });
-    vias.push(picked ? `${via}, picked by model` : via);
+    vias.push(hit.picked ? `${via}, picked by model` : via);
   }
   return {
     post: formatNewOpenAiModelsPost(fresh, articles),

@@ -1,3 +1,4 @@
+import { type HnStory, canonicalArticleUrl } from "./hn";
 import type { NewsItem } from "./openai_news";
 import { structuredFromPrompt } from "./summarize";
 import { escapeHtml, formatInline } from "./telegram";
@@ -72,6 +73,28 @@ export function findAnnouncement(id: string, items: NewsItem[], now = Date.now()
     }
   }
   return null;
+}
+
+/**
+ * The feed plus the front-page articles it does not carry, newest first as the
+ * feed is. The feed skips some launches outright — GPT-6 Astra on 2026-09-03,
+ * GPT-6.1 Sol on 2026-09-29 — and those reach the blog channel through Hacker
+ * News, so the model watch has to look there too or it posts the id bare
+ * beside the article. `stories` are articleCandidates, urls already canonical.
+ */
+export function withHnArticles(items: NewsItem[], stories: HnStory[], origin: string): NewsItem[] {
+  const inFeed = new Set(items.map((i) => canonicalArticleUrl(i.link, origin)));
+  const extra: NewsItem[] = stories
+    .filter((s) => !inFeed.has(s.url))
+    .map((s) => ({
+      title: s.title,
+      link: s.url,
+      description: "",
+      guid: s.url,
+      published: s.createdAt,
+      category: "",
+    }));
+  return [...items, ...extra].sort((a, b) => (b.published ?? 0) - (a.published ?? 0));
 }
 
 /** Recent items, system cards dropped, oldest first: the launch precedes the follow-ups that reuse the name. */

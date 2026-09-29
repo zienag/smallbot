@@ -6,6 +6,7 @@ import {
   isDatedSnapshot,
   listOpenAiModels,
   pickAnnouncement,
+  withHnArticles,
 } from "../src/openai_models";
 
 describe("findAnnouncement", () => {
@@ -66,6 +67,29 @@ describe("findAnnouncement", () => {
     expect(findAnnouncement("gpt-5.9", [item("Introducing GPT‑5.9")])?.title).toBe(
       "Introducing GPT‑5.9",
     );
+  });
+});
+
+describe("withHnArticles", () => {
+  // The Algolia hits of 2026-09-29, after articleCandidates; the feed's newest
+  // item was a day old and carried neither launch.
+  const sol = { title: "GPT 6.1 Sol", url: "https://openai.com/index/introducing-gpt-6-1-sol", points: 287, createdAt: Date.now() - DAY / 24 };
+  const dots = { title: "Dots", url: "https://openai.com/index/introducing-dots", points: 188, createdAt: Date.now() - DAY / 24 };
+  const old = { title: "OpenAI (2015)", url: "https://openai.com/index/introducing-openai", points: 44, createdAt: Date.now() - 2 * DAY };
+  const feed = [
+    item("Unrelated", DAY),
+    { ...item("Introducing OpenAI", 3650 * DAY), link: "https://openai.com/index/introducing-openai/" },
+  ];
+
+  it("lets the model watch find a launch only Hacker News carries", () => {
+    expect(findAnnouncement("gpt-6.1-sol", feed)).toBeNull();
+    const merged = withHnArticles(feed, [old, sol, dots], "https://openai.com");
+    expect(findAnnouncement("gpt-6.1-sol", merged)?.link).toBe(sol.url);
+  });
+
+  it("adds only what the feed does not carry, newest first like the feed", () => {
+    const merged = withHnArticles(feed, [old, sol, dots], "https://openai.com");
+    expect(merged.map((i) => i.title)).toEqual(["GPT 6.1 Sol", "Dots", "Unrelated", "Introducing OpenAI"]);
   });
 });
 
