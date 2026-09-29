@@ -2,10 +2,12 @@ name: Health
 
 # The cheap half of self-repair: no model, no session — a curl every half hour.
 # A source dark for an hour, or an error a source caught and worked around,
-# becomes one open issue labeled `health`, and that issue is what starts the
-# "smallbot health" cloud routine (a GitHub webhook trigger on issues opened).
-# While the issue is open nothing else fires; when /health is green again the
-# issue is closed here. docs/operations.md.
+# becomes one open issue labeled `health`, and the "smallbot health" cloud
+# routine is started for it by an HTTP call to the routine's own endpoint
+# (routines take GitHub events for pull requests and releases only, not for
+# issues). The call is repeated every run until one is accepted, which the
+# issue records as a comment. When /health is green again the issue is closed
+# here. docs/operations.md.
 on:
   schedule:
     - cron: "*/30 * * * *"
@@ -24,13 +26,16 @@ jobs:
           HEALTH_URL: https://smallbot.zienag.workers.dev/health
           # Ticks are 15 minutes apart; four failures is an hour, not a blip.
           FAILURES_BEFORE_ISSUE: 4
+          ROUTINE_FIRE_URL: https://api.anthropic.com/v1/claude_code/routines/trig_01NRsUECNabtXUdcUS29PMCa/fire
+          ROUTINE_FIRE_TOKEN: ${{ secrets.ROUTINE_FIRE_TOKEN }}
+          STARTED: Health routine started.
         run: |
           set -eu
           health=$(curl -sf --max-time 20 "$HEALTH_URL") \
             || health='{"ok":false,"failing":{"worker":{"failures":99,"error":"/health unreachable","since":0}}}'
           echo "$health"
           ok=$(echo "$health" | jq -r '.ok')
-          worst=$(echo "$health" | jq -r '[.failing[]?.failures // 99] | max // 0')
+          worst=$(echo "$health" | jq -r '[.failing[]? | .failures // 99] | max // 0')
           warned=$(echo "$health" | jq -r '.warnings // [] | length')
           open=$(gh issue list --repo "$GITHUB_REPOSITORY" --label health --state open --json number -q '.[0].number // empty')
           if [ "$ok" = "true" ]; then
@@ -39,13 +44,37 @@ jobs:
             fi
             exit 0
           fi
-          # A warning is an error already caught once: no blip to wait out.
-          if [ -n "$open" ] || { [ "$worst" -lt "$FAILURES_BEFORE_ISSUE" ] && [ "$warned" -eq 0 ]; }; then
+          if [ -z "$open" ]; then
+            # A warning is an error already caught once: no blip to wait out.
+            if [ "$worst" -lt "$FAILURES_BEFORE_ISSUE" ] && [ "$warned" -eq 0 ]; then
+              exit 0
+            fi
+            gh label create health --repo "$GITHUB_REPOSITORY" --color d73a4a \
+              --description "opened by the Health workflow; starts the health routine" 2>/dev/null || true
+            title="Sources failing or warning: $(echo "$health" | jq -r '[(.failing | keys[]), (.warnings // [] | .[].source)] | unique | join(", ")')"
+            body=$(printf 'Opened by the Health workflow from `/health` at %s. The health routine takes it from here.\n\n```json\n%s\n```\n' \
+              "$(date -u +%FT%TZ)" "$(echo "$health" | jq .)")
+            created=$(gh issue create --repo "$GITHUB_REPOSITORY" --label health --title "$title" --body "$body")
+            open=${created##*/}
+          fi
+          started=$(gh issue view "$open" --repo "$GITHUB_REPOSITORY" --json comments \
+            -q "[.comments[].body | select(startswith(\"$STARTED\"))] | length")
+          if [ "$started" -gt 0 ]; then
             exit 0
           fi
-          gh label create health --repo "$GITHUB_REPOSITORY" --color d73a4a \
-            --description "opened by the Health workflow; starts the health routine" 2>/dev/null || true
-          title="Sources failing or warning: $(echo "$health" | jq -r '[(.failing | keys[]), (.warnings // [] | .[].source)] | unique | join(", ")')"
-          body=$(printf 'Opened by the Health workflow from `/health` at %s. The health routine takes it from here.\n\n```json\n%s\n```\n' \
-            "$(date -u +%FT%TZ)" "$(echo "$health" | jq .)")
-          gh issue create --repo "$GITHUB_REPOSITORY" --label health --title "$title" --body "$body"
+          if [ -z "$ROUTINE_FIRE_TOKEN" ]; then
+            echo "::warning::ROUTINE_FIRE_TOKEN is not set: the routine was not started for #$open"
+            exit 0
+          fi
+          text=$(printf 'Health issue #%s in %s is open. /health answered:\n%s' "$open" "$GITHUB_REPOSITORY" "$health")
+          code=$(curl -s -o fire.json -w '%{http_code}' --max-time 30 -X POST "$ROUTINE_FIRE_URL" \
+            -H "Authorization: Bearer $ROUTINE_FIRE_TOKEN" \
+            -H "anthropic-beta: experimental-cc-routine-2026-04-01" \
+            -H "anthropic-version: 2023-06-01" \
+            -H "Content-Type: application/json" \
+            -d "$(jq -n --arg text "$text" '{text: $text}')") || code=000
+          if [ "$code" = "200" ]; then
+            gh issue comment "$open" --repo "$GITHUB_REPOSITORY" --body "$STARTED"
+          else
+            echo "::warning::the routine was not started for #$open: HTTP $code $(jq -c 'del(.claude_code_session_url)' fire.json 2>/dev/null || true)"
+          fi

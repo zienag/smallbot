@@ -37,7 +37,7 @@ npx wrangler dev --remote   # runs on the edge: the only way to exercise the BRO
 
 Two tsconfigs are deliberate: src uses `@cloudflare/workers-types` globals, test/ uses node types. Merging them breaks on the conflicting global `URL` type — don't.
 
-Prod verification, `/run` params, KV surgery and the deploy traps (a redeploy serves stale for ~a minute; a newly added cron can register yet never fire) are in docs/operations.md. **A push to `main` deploys** (CI), so main is prod. The Health workflow polls `/health` every half hour and opens a `health` issue when a source has been dark for an hour or has caught and worked around an error; that issue starts the "smallbot health" cloud routine, which fixes and pushes to main.
+Prod verification, `/run` params, KV surgery and the deploy traps (a redeploy serves stale for ~a minute; a newly added cron can register yet never fire) are in docs/operations.md. **A push to `main` deploys** (CI), so main is prod. The Health workflow polls `/health` every half hour and opens a `health` issue when a source has been dark for an hour or has caught and worked around an error; for that issue it starts the "smallbot health" cloud routine, which fixes and pushes to main.
 
 ## Secrets & deploy
 
