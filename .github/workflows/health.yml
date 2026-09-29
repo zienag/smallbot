@@ -7,7 +7,9 @@ name: Health
 # (routines take GitHub events for pull requests and releases only, not for
 # issues). The call is repeated every run until one is accepted, which the
 # issue records as a comment. When /health is green again the issue is closed
-# here. docs/operations.md.
+# here. A miss that raised no error (a post that went out wrong or bare) shows
+# nowhere in /health: it is handed to the routine as a report, which opens an
+# issue labeled `reported` that only the routine closes. docs/operations.md.
 on:
   schedule:
     - cron: "*/30 * * * *"
@@ -17,6 +19,10 @@ on:
         description: Start the routine now, whatever /health says, to check the call
         type: boolean
         default: false
+      report:
+        description: A miss that raised no error, with the facts established, for the routine to fix
+        type: string
+        default: ""
 
 permissions:
   issues: write
@@ -35,6 +41,7 @@ jobs:
           ROUTINE_FIRE_TOKEN: ${{ secrets.ROUTINE_FIRE_TOKEN }}
           STARTED: Health routine started.
           FIRE_TEST: ${{ inputs.fire_test }}
+          REPORT: ${{ inputs.report }}
         run: |
           set -eu
           # Prints the HTTP status; the answer's body is left in fire.json.
@@ -54,6 +61,38 @@ jobs:
             echo "HTTP $code $(answer)"
             [ "$code" = "200" ]
             exit
+          fi
+          # Started once per issue; a call that was refused is repeated next run.
+          start_for() {
+            started=$(gh issue view "$1" --repo "$GITHUB_REPOSITORY" --json comments \
+              -q "[.comments[].body | select(startswith(\"$STARTED\"))] | length")
+            if [ "$started" -gt 0 ]; then
+              return 0
+            fi
+            if [ -z "$ROUTINE_FIRE_TOKEN" ]; then
+              echo "::warning::ROUTINE_FIRE_TOKEN is not set: the routine was not started for #$1"
+              return 0
+            fi
+            code=$(fire "$2")
+            if [ "$code" = "200" ]; then
+              gh issue comment "$1" --repo "$GITHUB_REPOSITORY" --body "$STARTED"
+            else
+              echo "::warning::the routine was not started for #$1: HTTP $code $(answer)"
+            fi
+          }
+          if [ -n "$REPORT" ]; then
+            gh label create reported --repo "$GITHUB_REPOSITORY" --color fbca04 \
+              --description "a miss that raised no error; closed by the health routine" 2>/dev/null || true
+            created=$(gh issue create --repo "$GITHUB_REPOSITORY" --label reported \
+              --title "Reported miss: $(printf '%s' "$REPORT" | head -1 | cut -c1-80)" --body "$REPORT")
+            echo "$created"
+          fi
+          for n in $(gh issue list --repo "$GITHUB_REPOSITORY" --label reported --state open --json number -q '.[].number'); do
+            report=$(gh issue view "$n" --repo "$GITHUB_REPOSITORY" --json body -q '.body')
+            start_for "$n" "$(printf 'Reported miss, issue #%s in %s:\n%s' "$n" "$GITHUB_REPOSITORY" "$report")"
+          done
+          if [ -n "$REPORT" ]; then
+            exit 0
           fi
           health=$(curl -sf --max-time 20 "$HEALTH_URL") \
             || health='{"ok":false,"failing":{"worker":{"failures":99,"error":"/health unreachable","since":0}}}'
@@ -81,19 +120,4 @@ jobs:
             created=$(gh issue create --repo "$GITHUB_REPOSITORY" --label health --title "$title" --body "$body")
             open=${created##*/}
           fi
-          started=$(gh issue view "$open" --repo "$GITHUB_REPOSITORY" --json comments \
-            -q "[.comments[].body | select(startswith(\"$STARTED\"))] | length")
-          if [ "$started" -gt 0 ]; then
-            exit 0
-          fi
-          if [ -z "$ROUTINE_FIRE_TOKEN" ]; then
-            echo "::warning::ROUTINE_FIRE_TOKEN is not set: the routine was not started for #$open"
-            exit 0
-          fi
-          text=$(printf 'Health issue #%s in %s is open. /health answered:\n%s' "$open" "$GITHUB_REPOSITORY" "$health")
-          code=$(fire "$text")
-          if [ "$code" = "200" ]; then
-            gh issue comment "$open" --repo "$GITHUB_REPOSITORY" --body "$STARTED"
-          else
-            echo "::warning::the routine was not started for #$open: HTTP $code $(answer)"
-          fi
+          start_for "$open" "$(printf 'Health issue #%s in %s is open. /health answered:\n%s' "$open" "$GITHUB_REPOSITORY" "$health")"
