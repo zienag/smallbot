@@ -12,7 +12,9 @@ name: Health
 # issue labeled `reported` that only the routine closes. docs/operations.md.
 on:
   schedule:
-    - cron: "*/30 * * * *"
+    # Off the hour and the half hour: GitHub delays and drops scheduled runs
+    # at its busiest minutes, and on :00/:30 the gaps reached two and a half hours.
+    - cron: "13,43 * * * *"
   workflow_dispatch:
     inputs:
       fire_test:
