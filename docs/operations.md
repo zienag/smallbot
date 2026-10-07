@@ -87,6 +87,8 @@ npx wrangler d1 execute smallbot-archive --remote \
 
 **CPU is metered per invocation, and every fetch or KV read costs the runtime ~2 ms of it regardless of size** (measured 2026-09-02: parsers for a whole tick were ~7 ms, the rest was network operations). That is why the sources ride two crons instead of one and the npm dist-tag is asked only when a feed has something newer. Cloudflare's free plan allows 10 ms per invocation with tolerance for occasional overruns; watch `cpuTimeP50/P99` in the GraphQL analytics after adding a source.
 
+**KV operations are metered per day on the account**, not per worker: the free plan allows 100,000 reads and 1,000 each of writes, deletes and lists a day, and Cloudflare mails "KV daily operation limit 50% reached" at half (2026-09-23, 09-24, 10-06). Which bucket is filling is visible only in the dashboard (Workers KV → namespaces); the writes to suspect first are `http_validators`, rewritten by every tick in which any feed's validator changed, and `/health`, which costs two `list` operations per call.
+
 **`wrangler secret put` immediately followed by `wrangler deploy` can lose the secret**: the deploy snapshots bindings into a new version and can pick up the pre-put value (bit us with `ARCHIVE_READ_SECRET` — the token 403'd until the secret was re-put). Deploy first, then put secrets; after a put-then-deploy, re-put.
 
 **`--remote` needs `CLOUDFLARE_API_TOKEN` exported** or it dies on expired auth, and it authenticates `/run` against the **`.dev.vars` `TRIGGER_SECRET`**, which is not the Keychain one — reading the wrong one gets a bare `forbidden`.
