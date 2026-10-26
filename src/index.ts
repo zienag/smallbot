@@ -10,7 +10,7 @@ import {
   formatBlogPost,
   isRecentEntry,
 } from "./blogs";
-import { type BrowserRun, QUICK_ACTION_GAP_MS, fetchPageMarkdown, markdownTitle } from "./browser";
+import { type BrowserRun, QUICK_ACTION_GAP_MS, fetchPageMarkdown, markdownTitle, pacedBrowser } from "./browser";
 import { CHANGELOG_URL, fetchChangelog } from "./changelog";
 import { CODEX_RELEASES_ATOM_URL, fetchCodexReleases } from "./codex";
 import { Validators } from "./conditional";
@@ -1364,7 +1364,7 @@ async function runGroup(
   sources: FeedSource[],
   dryRun: boolean,
 ): Promise<string[]> {
-  env = { ...env, RELEASES: readingOwnWrites(env.RELEASES) };
+  env = { ...env, RELEASES: readingOwnWrites(env.RELEASES), BROWSER: env.BROWSER && pacedBrowser(env.BROWSER) };
   const runner = await SourceRunner.start(env, group, dryRun);
   const run = (tag: string, watch: () => Promise<string>) => runner.run(tag, watch);
   // Shared by the tick's conditional fetches; a source that failed before

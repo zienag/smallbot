@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { QUICK_ACTION_GAP_MS, fetchPageMarkdown, pacedBrowser } from "../src/browser";
 import {
   articleSlug,
   fetchNewsListSlugs,
@@ -60,6 +61,28 @@ describe("fetchNewsListSlugs", () => {
     const { slugs, via } = await fetchNewsListSlugs(browser);
     expect(slugs).toBeNull();
     expect(via).toBe("fetch:403 browser:failed");
+  });
+
+  it("waits out the quick-action gap another source of the tick just spent", async () => {
+    vi.useFakeTimers();
+    vi.stubGlobal("fetch", async () => new Response("denied", { status: 403 }));
+    const calls: number[] = [];
+    const browser = pacedBrowser({
+      quickAction: async () => {
+        calls.push(Date.now());
+        // As measured: a second action inside the gap is refused.
+        if (calls.length > 1 && calls[calls.length - 1] - calls[calls.length - 2] < QUICK_ACTION_GAP_MS) {
+          return Response.json({ success: false, errors: [{ code: 2001 }] }, { status: 429 });
+        }
+        return Response.json({ success: true, result: BROWSER_MARKDOWN });
+      },
+    });
+    // The models watch renders its announcement, then the blog watch reads the list.
+    await fetchPageMarkdown(browser, "https://openai.com/index/introducing-gpt-6-1-sol");
+    const list = fetchNewsListSlugs(browser);
+    await vi.runAllTimersAsync();
+    expect(await list).toEqual({ slugs: new Set(["index/a-post"]), via: "browser after fetch:403" });
+    vi.useRealTimers();
   });
 
   it("has no opinion when the shape changes under it", async () => {
