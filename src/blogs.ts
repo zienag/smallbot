@@ -1,6 +1,5 @@
-import { decodeHTML } from "entities";
 import { type Validators, conditionalFetch } from "./conditional";
-import { BOT_UA, articleText, pageTitle } from "./html";
+import { BOT_UA, type PageMemo, articleText, pageLinks, pageTitle } from "./html";
 import { structuredFromPrompt } from "./summarize";
 import { escapeHtml, formatInline } from "./telegram";
 
@@ -16,6 +15,9 @@ export interface BlogIndex {
   indexUrl: string;
   base: string;
   hrefPrefix: string; // post links on the index page are base-relative under this
+  // The index also links articles that live outside the prefix; each such link
+  // is opened once and judged by what the page itself is (probeArticle).
+  probeOffPrefix?: boolean;
 }
 
 export const BLOG_INDEXES: BlogIndex[] = [
@@ -30,6 +32,7 @@ export const BLOG_INDEXES: BlogIndex[] = [
     indexUrl: "https://www.anthropic.com/news",
     base: "https://www.anthropic.com",
     hrefPrefix: "/news/",
+    probeOffPrefix: true,
   },
   {
     source: "Anthropic Engineering",
@@ -42,36 +45,28 @@ export const BLOG_INDEXES: BlogIndex[] = [
 export interface BlogEntry {
   url: string;
   source: string;
-  published?: number; // epoch ms from the card's <time>, when the index dates it
+  probe?: true; // outside the index's prefix: an article only if its page says so
 }
 
-/** Same window as the other watches: a dated card older than this is not news. */
+/** Same window as the other watches: an article dated older than this is not news. */
 export const MAX_BLOG_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 
-/** Undated entries pass — the prefix indexes list only recent posts. */
-export function isRecentEntry(entry: BlogEntry, now: number): boolean {
-  return entry.published === undefined || now - entry.published <= MAX_BLOG_AGE_MS;
-}
-
 /**
- * Post links from an index page, in page order (newest first), deduped. A post
- * is a link under the index's prefix, or a card the index dates — an anchor
- * with a `<time>` inside — wherever it points: anthropic.com/news put the
- * Fable 5.1 launch in its featured card as /claude-fable-and-mythos-5-1, and
- * the prefix alone dropped it (2026-09-01). Only that index dates its cards;
- * the other two carry no `<time>` at all and rely on the prefix.
+ * Links of an index page, in page order (newest first), deduped. A link under
+ * the index's prefix is a post. anthropic.com/news also features articles that
+ * live elsewhere — every model launch since Fable 5.1 (/claude-fable-and-
+ * mythos-5-1, /claude-opus-5-5) — between links to the rest of the site, and
+ * nothing in the index's markup tells the two apart: the cards were dated
+ * until the dates were dropped, the address was relative until the featured
+ * one was written in full (2026-11-09, the Fable 5.2 launch never reached the
+ * channel). So those come back marked `probe`, for the page to speak for itself.
  */
 export function parseIndexLinks(index: BlogIndex, html: string): BlogEntry[] {
   const out: BlogEntry[] = [];
-  const seen = new Set<string>();
-  for (const [, href, body] of html.matchAll(/<a\s[^>]*href="(\/[^"#?]+)"[^>]*>([\s\S]*?)<\/a>/g)) {
-    const time = body.match(/<time[^>]*>([^<]*)<\/time>/);
-    if (!href.startsWith(index.hrefPrefix) && !time) continue;
-    const url = index.base + href;
-    if (seen.has(url)) continue;
-    seen.add(url);
-    const published = time ? Date.parse(decodeHTML(time[1]).trim()) : Number.NaN;
-    out.push({ url, source: index.source, ...(Number.isNaN(published) ? {} : { published }) });
+  for (const { url } of pageLinks(html, index.base)) {
+    if (url === index.base || url === index.indexUrl) continue;
+    if (url.startsWith(index.base + index.hrefPrefix)) out.push({ url, source: index.source });
+    else if (index.probeOffPrefix) out.push({ url, source: index.source, probe: true });
   }
   return out;
 }
@@ -79,19 +74,82 @@ export function parseIndexLinks(index: BlogIndex, html: string): BlogEntry[] {
 /**
  * Entries of every index that changed since its last fully processed read; an
  * unchanged index (a 304 — claude.com sends Last-Modified, anthropic.com
- * nothing, so it is always re-read) contributes none. Null when no index changed.
+ * nothing, so it is always re-read) contributes none. Null when no index
+ * changed. An index another watch already downloaded this tick is taken from
+ * `pages`.
  */
-export async function fetchAllBlogEntries(validators?: Validators): Promise<BlogEntry[] | null> {
+export async function fetchAllBlogEntries(validators?: Validators, pages?: PageMemo): Promise<BlogEntry[] | null> {
   const out: BlogEntry[] = [];
   let changed = false;
   for (const index of BLOG_INDEXES) {
-    const res = await conditionalFetch(index.indexUrl, validators, { "User-Agent": BOT_UA });
-    if (!res) continue;
-    if (!res.ok) throw new Error(`${index.source} index fetch failed: ${res.status}`);
+    let html = pages?.get(index.indexUrl);
+    if (html === undefined) {
+      const res = await conditionalFetch(index.indexUrl, validators, { "User-Agent": BOT_UA });
+      if (!res) continue;
+      if (!res.ok) throw new Error(`${index.source} index fetch failed: ${res.status}`);
+      html = await res.text();
+    }
     changed = true;
-    out.push(...parseIndexLinks(index, await res.text()));
+    out.push(...parseIndexLinks(index, html));
   }
   return changed ? out : null;
+}
+
+const PROBE_TEXT_LIMIT = 3000;
+
+const PROBE_PROMPT = (url: string, title: string, text: string) => `\
+A Telegram channel reposts every new article Anthropic publishes. Anthropic's \
+news page links the page below, which sits outside the news section: it may be \
+an article in its own right (a model launch, a research post, a feature story) \
+or just a part of the site (a product page, a hub or team page listing other \
+posts, search, legal, careers).
+
+Address: ${url}
+Title: ${title}
+The start of its text (extracted from the page, may contain navigation noise):
+${text}
+
+Is this page itself one article or announcement? And what publication date \
+does the page state for itself, as YYYY-MM-DD? Leave the date empty when the \
+page states none: it is compared with today to decide whether the article is \
+new, so a guessed date would repost something old.`;
+
+const PROBE_SCHEMA = {
+  type: "object",
+  properties: { article: { type: "boolean" }, published: { type: "string" } },
+  required: ["article", "published"],
+  additionalProperties: false,
+};
+
+/**
+ * What an off-prefix link turned out to be: a recent article (with its page,
+ * so the digest does not download it again), something to absorb into the
+ * seen-set for good (not an article, undated, old, gone), or a page that did
+ * not answer and is asked again next tick.
+ */
+export async function probeArticle(
+  apiKey: string,
+  kv: KVNamespace,
+  url: string,
+  now: number,
+): Promise<{ page: string } | "absorb" | "retry"> {
+  // A redirect is a download or another site (/press-kit), never an article.
+  const res = await fetch(url, { headers: { "User-Agent": BOT_UA }, redirect: "manual" });
+  if (res.status >= 500 || res.status === 429) return "retry";
+  if (!res.ok) return "absorb";
+  const page = await res.text();
+  const text = articleText(page);
+  if (!text) return "absorb";
+  const verdict = await structuredFromPrompt<{ article: boolean; published: string }>(
+    apiKey,
+    kv,
+    PROBE_PROMPT(url, pageTitle(page) ?? "", text.slice(0, PROBE_TEXT_LIMIT)),
+    PROBE_SCHEMA,
+    "haiku",
+  );
+  const published = /^\d{4}-\d{2}-\d{2}$/.test(verdict.published) ? Date.parse(verdict.published) : Number.NaN;
+  if (!verdict.article || Number.isNaN(published) || now - published > MAX_BLOG_AGE_MS) return "absorb";
+  return { page };
 }
 
 // Importance drives delivery: major is pinned, minor posts without sound.
@@ -215,10 +273,13 @@ export async function digestBlogPost(
   apiKey: string,
   kv: KVNamespace,
   entry: BlogEntry,
+  page?: string,
 ): Promise<BlogDigest> {
-  const res = await fetch(entry.url, { headers: { "User-Agent": BOT_UA } });
-  if (!res.ok) throw new Error(`blog post fetch failed: ${res.status} ${entry.url}`);
-  const page = await res.text();
+  if (page === undefined) {
+    const res = await fetch(entry.url, { headers: { "User-Agent": BOT_UA } });
+    if (!res.ok) throw new Error(`blog post fetch failed: ${res.status} ${entry.url}`);
+    page = await res.text();
+  }
   const title = pageTitle(page) ?? entry.url;
   const digest = await digestArticle(
     apiKey,

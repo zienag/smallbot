@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { BLOG_INDEXES, formatBlogPost, isRecentEntry, parseIndexLinks, readMinutes } from "../src/blogs";
+import { BLOG_INDEXES, formatBlogPost, parseIndexLinks, readMinutes } from "../src/blogs";
 import { articleText } from "../src/html";
 
 const claudeBlog = BLOG_INDEXES[0];
@@ -22,32 +22,21 @@ describe("parseIndexLinks", () => {
     expect(urls.some((u) => u.includes("/ja/") || u.includes("?"))).toBe(false);
   });
 
-  it("takes a dated card wherever it points, and an undated link only under the prefix", () => {
+  // 2026-11-09: the featured card of the Fable 5.2 launch had its address
+  // written in full and no date, and the launch never reached the channel.
+  it("marks what the news index links outside its section for a look at the page itself", () => {
     const news = BLOG_INDEXES[1];
     const html = `
-      <a href="/claude-fable-and-mythos-5-1" class="FeaturedGrid_content"><h2>Introducing Claude Fable 5.1</h2>
-        <time>Sep 1, 2026</time></a>
-      <a href="/news/enterprise-frontier-safeguards" class="PublicationList_listItem"><time>Sep 1, 2026</time>Safeguards</a>
-      <a href="/features/making-of-claude-code"><span>Features</span><time>Jul 6, 2026</time></a>
-      <footer><a href="/research">Research</a><a href="/claude-corps">Claude Corps</a></footer>`;
-    expect(parseIndexLinks(news, html).map((e) => e.url)).toEqual([
-      "https://www.anthropic.com/claude-fable-and-mythos-5-1",
-      "https://www.anthropic.com/news/enterprise-frontier-safeguards",
-      "https://www.anthropic.com/features/making-of-claude-code",
+      <a href="/news">News</a>
+      <a href="https://www.anthropic.com/claude-fable-and-mythos-5-2"><h2>Introducing Claude Fable 5.2</h2></a>
+      <a href="/news/s1-sec">Anthropic files S-1</a>
+      <a href="/science">Science</a>
+      <a href="https://x.com/AnthropicAI">X</a>`;
+    expect(parseIndexLinks(news, html)).toEqual([
+      { url: "https://www.anthropic.com/claude-fable-and-mythos-5-2", source: "Anthropic News", probe: true },
+      { url: "https://www.anthropic.com/news/s1-sec", source: "Anthropic News" },
+      { url: "https://www.anthropic.com/science", source: "Anthropic News", probe: true },
     ]);
-    expect(parseIndexLinks(news, html).map((e) => e.published)).toEqual([
-      Date.parse("Sep 1, 2026"),
-      Date.parse("Sep 1, 2026"),
-      Date.parse("Jul 6, 2026"),
-    ]);
-  });
-
-  it("dates gate a card; an undated prefix link always passes", () => {
-    const now = Date.parse("2026-09-02T00:00:00Z");
-    const day = 24 * 60 * 60 * 1000;
-    expect(isRecentEntry({ url: "u", source: "s", published: now - day }, now)).toBe(true);
-    expect(isRecentEntry({ url: "u", source: "s", published: now - 30 * day }, now)).toBe(false);
-    expect(isRecentEntry({ url: "u", source: "s" }, now)).toBe(true);
   });
 });
 

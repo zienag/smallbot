@@ -1,4 +1,13 @@
 import {
+  type Candidate,
+  type Followup,
+  confirmAnnouncement,
+  isOpen,
+  loadFollowups,
+  saveFollowups,
+  shortlistAnnouncements,
+} from "./announcement";
+import {
   ANTHROPIC_BLOG_SEEN_KEY,
   BLOG_INDEXES,
   type BlogEntry,
@@ -8,7 +17,7 @@ import {
   digestBlogPost,
   fetchAllBlogEntries,
   formatBlogPost,
-  isRecentEntry,
+  probeArticle,
 } from "./blogs";
 import { type BrowserRun, QUICK_ACTION_GAP_MS, fetchPageMarkdown, markdownTitle, pacedBrowser } from "./browser";
 import { CHANGELOG_URL, fetchChangelog } from "./changelog";
@@ -30,11 +39,18 @@ import {
 } from "./health";
 import { type HnStory, articleCandidates, canonicalArticleUrl, fetchHnStories } from "./hn";
 import { readingOwnWrites } from "./kv";
+import type { PageMemo } from "./html";
 import {
   KNOWN_MODELS_KEY,
-  buildAnnouncements,
+  MODEL_FOLLOWUPS_KEY,
+  type ModelInfo,
+  type PressDigest,
+  type PressMatch,
+  fetchPressCandidates,
   formatNewModelsPost,
+  isDatedSnapshot,
   listModels,
+  matchPress,
 } from "./models";
 import {
   OPENAI_BLOG_SEEN_KEY,
@@ -52,12 +68,13 @@ import {
 } from "./openai_news";
 import {
   OPENAI_KNOWN_MODELS_KEY,
+  OPENAI_MODEL_FOLLOWUPS_KEY,
   type OpenAiArticle,
   type OpenAiModel,
-  findAnnouncement,
+  announcementCandidates,
   formatNewOpenAiModelsPost,
+  isDatedSnapshot as isOpenAiDatedSnapshot,
   listOpenAiModels,
-  pickAnnouncement,
   withHnArticles,
 } from "./openai_models";
 import {
@@ -284,7 +301,33 @@ async function runFeed(
   return `${source.key}: posted ${posted.join(", ")}${dryRun ? " (dry)" : ""}`;
 }
 
-async function watchAnthropicModels(env: Env, dryRun: boolean): Promise<string> {
+type PressLine = Omit<PressDigest, "photos">;
+type ModelFollowup = Followup<ModelInfo, PressLine>;
+
+function unmatchedModels(models: ModelInfo[], matched: string[]): ModelInfo[] {
+  return models.filter((m) => !isDatedSnapshot(m.id) && !matched.includes(m.id));
+}
+
+/** Enrichment only: any failure is a warning and the ids go out alone. */
+async function matchAnthropicPress(
+  env: Env,
+  models: ModelInfo[],
+  asked: string[],
+  withPhotos: boolean,
+  pages: PageMemo,
+): Promise<PressMatch> {
+  const open = unmatchedModels(models, []);
+  if (open.length === 0) return { press: [], matched: [], asked: [] };
+  try {
+    const candidates = (await fetchPressCandidates(open, pages)).filter((c) => !asked.includes(c.url));
+    return await matchPress(env.ANTHROPIC_API_KEY, env.RELEASES, open, candidates, withPhotos);
+  } catch (err) {
+    warn(`press release lookup failed for ${open.map((m) => m.id).join(", ")}: ${err}`);
+    return { press: [], matched: [], asked: [] };
+  }
+}
+
+async function watchAnthropicModels(env: Env, dryRun: boolean, pages: PageMemo): Promise<string> {
   const models = await listModels(env.ANTHROPIC_API_KEY);
   const knownRaw = await env.RELEASES.get(KNOWN_MODELS_KEY);
   if (!knownRaw) {
@@ -292,23 +335,78 @@ async function watchAnthropicModels(env: Env, dryRun: boolean): Promise<string> 
     await env.RELEASES.put(KNOWN_MODELS_KEY, JSON.stringify(models.map((m) => m.id)));
     return `models: seeded ${models.length} known, nothing posted`;
   }
+  const followed = dryRun ? "" : await followUpAnthropicModels(env, pages);
   const known = new Set(JSON.parse(knownRaw) as string[]);
   const fresh = models.filter((m) => !known.has(m.id));
-  if (fresh.length === 0) return "models: nothing new";
+  if (fresh.length === 0) return `models: nothing new${followed}`;
 
-  const announcements = await buildAnnouncements(env.ANTHROPIC_API_KEY, env.RELEASES, fresh);
-  const post = formatNewModelsPost(announcements);
+  const match = await matchAnthropicPress(env, fresh, [], true, pages);
+  const post = formatNewModelsPost(fresh, match.press);
   const ids = fresh.map((m) => m.id).join(", ");
   if (dryRun) {
     console.log(`DRY_RUN: would post new models:\n${post}`);
     return `models: would post ${ids} (dry)`;
   }
-  await postModelsMessage(env, post, announcements);
+  const sent = await postModelsMessage(env, post, match.press);
   await env.RELEASES.put(
     KNOWN_MODELS_KEY,
     JSON.stringify([...known, ...fresh.map((m) => m.id)]),
   );
-  return `models: posted ${ids}`;
+  // An album's caption is not a text message: only a plain post is edited later.
+  if (!sent.album && unmatchedModels(fresh, match.matched).length > 0) {
+    const pending = await loadFollowups<ModelFollowup>(env.RELEASES, MODEL_FOLLOWUPS_KEY);
+    pending.push({
+      messageId: sent.messageId,
+      postedAt: Date.now(),
+      models: fresh,
+      articles: match.press.map(({ url, title, bullets }) => ({ url, title, bullets })),
+      matched: match.matched,
+      asked: match.asked,
+    });
+    await saveFollowups(env.RELEASES, MODEL_FOLLOWUPS_KEY, pending);
+  }
+  return `models: posted ${ids}${followed}`;
+}
+
+/** The Anthropic counterpart of followUpOpenAiModels. */
+async function followUpAnthropicModels(env: Env, pages: PageMemo): Promise<string> {
+  try {
+    const all = await loadFollowups<ModelFollowup>(env.RELEASES, MODEL_FOLLOWUPS_KEY);
+    if (all.length === 0) return "";
+    const now = Date.now();
+    const notes: string[] = [];
+    const kept: ModelFollowup[] = [];
+    for (const followup of all.filter((f) => isOpen(f, now))) {
+      const match = await matchAnthropicPress(
+        env,
+        unmatchedModels(followup.models, followup.matched),
+        followup.asked,
+        false,
+        pages,
+      );
+      const next: ModelFollowup = {
+        ...followup,
+        articles: [...followup.articles, ...match.press.map(({ url, title, bullets }) => ({ url, title, bullets }))],
+        matched: [...followup.matched, ...match.matched],
+        asked: [...followup.asked, ...match.asked],
+      };
+      if (match.press.length > 0) {
+        const chat = env.TELEGRAM_MODELS_CHAT_ID!;
+        const text = formatNewModelsPost(next.models, next.articles);
+        await editMessageText(env.TELEGRAM_BOT_TOKEN, chat, next.messageId, text);
+        await recordAction(env.ARCHIVE, { chat, kind: "edit", messageId: next.messageId, text });
+        notes.push(match.press.map((p) => p.title).join(" | "));
+      }
+      if (unmatchedModels(next.models, next.matched).length > 0) kept.push(next);
+    }
+    if (JSON.stringify(kept) !== JSON.stringify(all)) {
+      await saveFollowups(env.RELEASES, MODEL_FOLLOWUPS_KEY, kept);
+    }
+    return notes.length > 0 ? `, added to an earlier post: ${notes.join(" | ")}` : "";
+  } catch (err) {
+    warn(`models: follow-up failed: ${err}`);
+    return "";
+  }
 }
 
 // One message: an album with a caption. No photos, caption over the limit,
@@ -316,17 +414,17 @@ async function watchAnthropicModels(env: Env, dryRun: boolean): Promise<string> 
 async function postModelsMessage(
   env: Env,
   post: string,
-  announcements: { press?: { photos: { bytes: ArrayBuffer; mediaType: string }[] } }[],
+  press: { photos: { bytes: ArrayBuffer; mediaType: string }[] }[],
   previewTo?: string,
-): Promise<void> {
+): Promise<{ messageId: number; album: boolean }> {
   const chatId = previewTo ?? env.TELEGRAM_MODELS_CHAT_ID!;
-  const photos = announcements.flatMap((a) => a.press?.photos ?? []).slice(0, 10);
+  const photos = press.flatMap((p) => p.photos).slice(0, 10);
   if (photos.length > 0 && post.length <= CAPTION_LIMIT) {
     try {
       const messageId = await sendAlbum(env.TELEGRAM_BOT_TOKEN, chatId, post, photos);
       if (!previewTo)
         await recordAction(env.ARCHIVE, { chat: chatId, kind: "send", messageId, text: post, photos });
-      return;
+      return { messageId, album: true };
     } catch (err) {
       warn(`album failed, falling back to plain text: ${err}`);
     }
@@ -334,7 +432,10 @@ async function postModelsMessage(
   const messageId = await sendMessage(env.TELEGRAM_BOT_TOKEN, chatId, post);
   if (!previewTo)
     await recordAction(env.ARCHIVE, { chat: chatId, kind: "send", messageId, text: post });
+  return { messageId, album: false };
 }
+
+type OpenAiFollowup = Followup<OpenAiModel, OpenAiArticle>;
 
 /**
  * The OpenAI half of the model channel, mirroring the Anthropic one: a new id in
@@ -351,39 +452,51 @@ async function watchOpenAiModels(env: Env, dryRun: boolean): Promise<string> {
     await env.RELEASES.put(OPENAI_KNOWN_MODELS_KEY, JSON.stringify(models.map((m) => m.id)));
     return `openai_models: seeded ${models.length} known, nothing posted`;
   }
+  const followed = dryRun ? "" : await followUpOpenAiModels(env);
   const known = new Set(JSON.parse(knownRaw) as string[]);
   const fresh = models.filter((m) => !known.has(m.id));
-  if (fresh.length === 0) return "openai_models: nothing new";
+  if (fresh.length === 0) return `openai_models: nothing new${followed}`;
 
-  const { post, via } = await buildOpenAiModelsPost(env, fresh);
+  const built = await buildOpenAiModelsPost(env, fresh);
   const ids = fresh.map((m) => m.id).join(", ");
   if (dryRun) {
-    console.log(`DRY_RUN: would post new OpenAI models:\n${post}`);
-    return `openai_models: would post ${ids} [${via}] (dry)`;
+    console.log(`DRY_RUN: would post new OpenAI models:\n${built.post}`);
+    return `openai_models: would post ${ids} [${built.via}] (dry)`;
   }
-  const messageId = await sendMessage(env.TELEGRAM_BOT_TOKEN, env.TELEGRAM_MODELS_CHAT_ID!, post);
-  await recordAction(env.ARCHIVE, {
-    chat: env.TELEGRAM_MODELS_CHAT_ID!,
-    kind: "send",
-    messageId,
-    text: post,
-  });
+  const chat = env.TELEGRAM_MODELS_CHAT_ID!;
+  const messageId = await sendMessage(env.TELEGRAM_BOT_TOKEN, chat, built.post);
+  await recordAction(env.ARCHIVE, { chat, kind: "send", messageId, text: built.post });
   // Union-merge: a model the API stops listing for a tick must not re-announce.
   await env.RELEASES.put(
     OPENAI_KNOWN_MODELS_KEY,
     JSON.stringify([...known, ...fresh.map((m) => m.id)]),
   );
-  return `openai_models: posted ${ids} [${via}]`;
+  if (unmatchedOpenAi(fresh, built.matched).length > 0 && built.articles.length < MAX_ANNOUNCEMENTS_PER_POST) {
+    const pending = await loadFollowups<OpenAiFollowup>(env.RELEASES, OPENAI_MODEL_FOLLOWUPS_KEY);
+    pending.push({
+      messageId,
+      postedAt: Date.now(),
+      models: fresh,
+      articles: built.articles,
+      matched: built.matched,
+      asked: built.asked,
+    });
+    await saveFollowups(env.RELEASES, OPENAI_MODEL_FOLLOWUPS_KEY, pending);
+  }
+  return `openai_models: posted ${ids} [${built.via}]${followed}`;
 }
 
 // Each article costs a browser action or ~7.6¢, and OpenAI announces a whole
 // family in one post, so a tick's worth of ids rarely needs more than one.
 const MAX_ANNOUNCEMENTS_PER_POST = 2;
 
-async function buildOpenAiModelsPost(
-  env: Env,
-  fresh: OpenAiModel[],
-): Promise<{ post: string; via: string }> {
+/** Dated snapshots ride on their alias's article and are never matched themselves. */
+function unmatchedOpenAi(models: OpenAiModel[], matched: string[]): OpenAiModel[] {
+  return models.filter((m) => !isOpenAiDatedSnapshot(m.id) && !matched.includes(m.id));
+}
+
+/** The feed plus the Hacker News front-page articles it does not carry. */
+async function openAiAnnouncementItems(): Promise<{ items: NewsItem[]; fromHn: Set<string> }> {
   let items: NewsItem[] = [];
   try {
     items = await fetchOpenAiNews();
@@ -391,8 +504,6 @@ async function buildOpenAiModelsPost(
     // Enrichment only; the ids are the announcement.
     warn(`openai_models: feed fetch failed, posting ids alone: ${err}`);
   }
-  // The feed skips some launches; the HN watch posts those to the blog channel,
-  // and the model post has to find the same article.
   const fromHn = new Set<string>();
   try {
     const stories = articleCandidates(
@@ -406,42 +517,138 @@ async function buildOpenAiModelsPost(
   } catch (err) {
     warn(`openai_models: hn search failed, matching against the feed alone: ${err}`);
   }
-  const found: { item: NewsItem; picked: boolean }[] = [];
-  for (const model of fresh) {
-    let hit = findAnnouncement(model.id, items);
-    let picked = false;
-    if (!hit) {
-      // The pattern reads only names spelled like the id; the model reads the rest.
-      try {
-        hit = await pickAnnouncement(env.ANTHROPIC_API_KEY, env.RELEASES, model.id, items);
-        picked = hit !== null;
-      } catch (err) {
-        warn(`openai_models: announcement pick failed for ${model.id}: ${err}`);
-      }
-    }
-    if (hit && !found.some((f) => f.item.link === hit.link)) found.push({ item: hit, picked });
-    if (found.length === MAX_ANNOUNCEMENTS_PER_POST) break;
+  return { items, fromHn };
+}
+
+interface OpenAiMatch {
+  articles: OpenAiArticle[];
+  matched: string[];
+  asked: string[]; // candidates that got a verdict; one whose page would not render is asked again
+  vias: string[];
+}
+
+/**
+ * The articles that announce `models`, among the candidates not yet `asked`
+ * about. A page is attached only once its own text was read and names the
+ * model; one the browser could not render is left for the next tick.
+ */
+async function matchOpenAiArticles(
+  env: Env,
+  models: OpenAiModel[],
+  asked: string[],
+  room: number,
+): Promise<OpenAiMatch> {
+  const none: OpenAiMatch = { articles: [], matched: [], asked: [], vias: [] };
+  if (models.length === 0 || room <= 0) return none;
+  const { items, fromHn } = await openAiAnnouncementItems();
+  const byUrl = new Map(items.map((i) => [i.link, i]));
+  const candidates = announcementCandidates(items).filter((c) => !asked.includes(c.url));
+  if (candidates.length === 0) return none;
+  let picks: Map<string, Candidate>;
+  try {
+    picks = await shortlistAnnouncements(env.ANTHROPIC_API_KEY, env.RELEASES, "OpenAI", models, candidates);
+  } catch (err) {
+    warn(`openai_models: announcement shortlist failed: ${err}`);
+    return none;
   }
-  const articles: OpenAiArticle[] = [];
-  const vias: string[] = [];
-  for (const [i, hit] of found.entries()) {
-    let { item } = hit;
+  const out: OpenAiMatch = { ...none, articles: [], matched: [], vias: [] };
+  const unread = new Set<string>();
+  const urls = [...new Set([...picks.values()].map((c) => c.url))];
+  for (const [i, url] of urls.entries()) {
+    const open = models.filter((m) => !out.matched.includes(m.id));
+    if (out.articles.length === room || open.length === 0) {
+      unread.add(url);
+      continue;
+    }
     // Browser Run's free plan allows one quick action per 10 seconds.
     if (i > 0) await new Promise((r) => setTimeout(r, QUICK_ACTION_GAP_MS));
-    let markdown: string | null | undefined;
-    if (fromHn.has(item.link)) {
-      // As in the HN watch: the page's heading is the title, HN's wording the fallback.
-      markdown = await fetchPageMarkdown(env.BROWSER, item.link);
-      item = { ...item, title: (markdown && markdownTitle(markdown)) || item.title };
+    let item = byUrl.get(url)!;
+    const markdown = await fetchPageMarkdown(env.BROWSER, url);
+    if (!markdown) {
+      unread.add(url);
+      continue;
     }
+    // As in the HN watch: the page's heading is the title, HN's wording the fallback.
+    if (fromHn.has(url)) item = { ...item, title: markdownTitle(markdown) || item.title };
+    let announced: string[];
+    try {
+      announced = await confirmAnnouncement(env.ANTHROPIC_API_KEY, env.RELEASES, "OpenAI", open, {
+        title: item.title,
+        text: markdown,
+      });
+    } catch (err) {
+      warn(`openai_models: announcement check failed for ${url}: ${err}`);
+      unread.add(url);
+      continue;
+    }
+    if (announced.length === 0) continue;
     const { bullets, via } = await digestOpenAiArticle(env, item, markdown);
-    articles.push({ item, bullets });
-    vias.push(hit.picked ? `${via}, picked by model` : via);
+    out.articles.push({ item, bullets });
+    out.matched.push(...announced);
+    out.vias.push(via);
   }
+  out.asked = candidates.map((c) => c.url).filter((url) => !unread.has(url));
+  return out;
+}
+
+async function buildOpenAiModelsPost(
+  env: Env,
+  fresh: OpenAiModel[],
+): Promise<OpenAiMatch & { post: string; via: string }> {
+  const match = await matchOpenAiArticles(env, unmatchedOpenAi(fresh, []), [], MAX_ANNOUNCEMENTS_PER_POST);
   return {
-    post: formatNewOpenAiModelsPost(fresh, articles),
-    via: vias.length === 0 ? "ids only" : vias.join(", "),
+    ...match,
+    post: formatNewOpenAiModelsPost(fresh, match.articles),
+    via: match.vias.length === 0 ? "ids only" : match.vias.join(", "),
   };
+}
+
+/**
+ * Looks again for the article of each recent post that went out without one,
+ * and edits the post when it turns up. A failure here is a warning: the post
+ * is already out and the diff below must still run.
+ */
+async function followUpOpenAiModels(env: Env): Promise<string> {
+  try {
+    const all = await loadFollowups<OpenAiFollowup>(env.RELEASES, OPENAI_MODEL_FOLLOWUPS_KEY);
+    if (all.length === 0) return "";
+    const now = Date.now();
+    const pending = all.filter((f) => isOpen(f, now));
+    const notes: string[] = [];
+    const kept: OpenAiFollowup[] = [];
+    for (const followup of pending) {
+      const match = await matchOpenAiArticles(
+        env,
+        unmatchedOpenAi(followup.models, followup.matched),
+        followup.asked,
+        MAX_ANNOUNCEMENTS_PER_POST - followup.articles.length,
+      );
+      const next: OpenAiFollowup = {
+        ...followup,
+        articles: [...followup.articles, ...match.articles],
+        matched: [...followup.matched, ...match.matched],
+        asked: [...followup.asked, ...match.asked],
+      };
+      if (match.articles.length > 0) {
+        const chat = env.TELEGRAM_MODELS_CHAT_ID!;
+        const text = formatNewOpenAiModelsPost(next.models, next.articles);
+        await editMessageText(env.TELEGRAM_BOT_TOKEN, chat, next.messageId, text);
+        await recordAction(env.ARCHIVE, { chat, kind: "edit", messageId: next.messageId, text });
+        notes.push(match.articles.map((a) => a.item.title).join(" | "));
+      }
+      const done =
+        unmatchedOpenAi(next.models, next.matched).length === 0 ||
+        next.articles.length >= MAX_ANNOUNCEMENTS_PER_POST;
+      if (!done) kept.push(next);
+    }
+    if (JSON.stringify(kept) !== JSON.stringify(all)) {
+      await saveFollowups(env.RELEASES, OPENAI_MODEL_FOLLOWUPS_KEY, kept);
+    }
+    return notes.length > 0 ? `, added to an earlier post: ${notes.join(" | ")}` : "";
+  } catch (err) {
+    warn(`openai_models: follow-up failed: ${err}`);
+    return "";
+  }
 }
 
 // The tier tunes delivery: minor posts silently, major additionally pins.
@@ -488,15 +695,19 @@ async function sendPreviewTiered(
 }
 
 const MAX_BLOG_POSTS_PER_TICK = 5;
+// Each probe is a page download and a small-model call; a redesign that adds
+// twenty links to the index is worked through over a few ticks.
+const MAX_BLOG_PROBES_PER_TICK = 5;
 
 async function watchAnthropicBlogs(
   env: Env,
   dryRun: boolean,
   validators: Validators,
+  pages: PageMemo,
 ): Promise<string> {
   const seenRaw = await env.RELEASES.get(ANTHROPIC_BLOG_SEEN_KEY);
   // A first run has processed nothing yet, so it reads every index in full.
-  const entries = await fetchAllBlogEntries(seenRaw ? validators : undefined);
+  const entries = await fetchAllBlogEntries(seenRaw ? validators : undefined, pages);
   if (entries === null) return "blog: unchanged";
   const commitIndexes = () => {
     if (!dryRun) for (const index of BLOG_INDEXES) validators.commit(index.indexUrl);
@@ -509,25 +720,44 @@ async function watchAnthropicBlogs(
   }
   const seen = new Set(JSON.parse(seenRaw) as string[]);
   const now = Date.now();
-  // A dated card that is old is a backfill or a feature the index resurfaced,
-  // absorbed into the seen-set without a post — the age gate every watch has.
-  const stale = entries.filter((e) => !seen.has(e.url) && !isRecentEntry(e, now));
-  if (stale.length > 0 && !dryRun) {
-    for (const entry of stale) seen.add(entry.url);
+  const unseen = entries.filter((e) => !seen.has(e.url));
+  // A link from outside the index's section is an article only if its own page
+  // says so, with a recent date: the age gate every watch has. Anything else
+  // is absorbed into the seen-set without a post.
+  const ready: { entry: BlogEntry; page?: string }[] = [];
+  const absorbed: string[] = [];
+  let probes = 0;
+  let waiting = 0;
+  for (const entry of unseen) {
+    if (!entry.probe) {
+      ready.push({ entry });
+      continue;
+    }
+    if (probes === MAX_BLOG_PROBES_PER_TICK) {
+      waiting++;
+      continue;
+    }
+    probes++;
+    const probe = await probeArticle(env.ANTHROPIC_API_KEY, env.RELEASES, entry.url, now);
+    if (probe === "retry") waiting++;
+    else if (probe === "absorb") absorbed.push(entry.url);
+    else ready.push({ entry, page: probe.page });
+  }
+  if (absorbed.length > 0 && !dryRun) {
+    for (const url of absorbed) seen.add(url);
     await env.RELEASES.put(ANTHROPIC_BLOG_SEEN_KEY, JSON.stringify([...seen]));
   }
-  const skipped = stale.length > 0 ? `, skipped ${stale.length} stale` : "";
-  const unseen = entries.filter((e) => !seen.has(e.url) && isRecentEntry(e, now));
+  const skipped = absorbed.length > 0 ? `, absorbed ${absorbed.length} that are not new articles` : "";
   // Oldest first; the cap bounds LLM calls per tick, the tail catches up next tick.
-  const fresh = unseen.reverse().slice(0, MAX_BLOG_POSTS_PER_TICK);
+  const fresh = [...ready].reverse().slice(0, MAX_BLOG_POSTS_PER_TICK);
   if (fresh.length === 0) {
-    commitIndexes();
+    if (waiting === 0) commitIndexes();
     return `blog: nothing new${skipped}`;
   }
 
   const posted: string[] = [];
-  for (const entry of fresh) {
-    const digest = await digestBlogPost(env.ANTHROPIC_API_KEY, env.RELEASES, entry);
+  for (const { entry, page } of fresh) {
+    const digest = await digestBlogPost(env.ANTHROPIC_API_KEY, env.RELEASES, entry, page);
     const post = formatBlogPost(entry, digest);
     if (dryRun) {
       console.log(`DRY_RUN: would post [${digest.tier}] ${entry.url}:\n${post}`);
@@ -538,8 +768,8 @@ async function watchAnthropicBlogs(
     }
     posted.push(`${entry.url} [${digest.tier}]`);
   }
-  // A tail cut by the cap keeps the indexes re-read until it has caught up.
-  if (posted.length === unseen.length) commitIndexes();
+  // A tail cut by a cap keeps the indexes re-read until it has caught up.
+  if (posted.length === ready.length && waiting === 0) commitIndexes();
   return `blog: posted ${posted.join(", ")}${skipped}${dryRun ? " (dry)" : ""}`;
 }
 
@@ -1242,11 +1472,11 @@ async function forceModelAnnouncement(
     displayName: id,
     createdAt: "",
   };
-  const announcements = await buildAnnouncements(env.ANTHROPIC_API_KEY, env.RELEASES, [model]);
-  const post = formatNewModelsPost(announcements);
-  const photoUrls = announcements.flatMap((a) => a.press?.photos.map((p) => p.url) ?? []);
+  const { press } = await matchAnthropicPress(env, [model], [], true, new Map());
+  const post = formatNewModelsPost([model], press);
+  const photoUrls = press.flatMap((p) => p.photos.map((photo) => photo.url));
   if (previewTo) {
-    await postModelsMessage(env, post, announcements, previewTo);
+    await postModelsMessage(env, post, press, previewTo);
     return `models: previewed ${id} (photos: ${photoUrls.join(", ") || "none"})`;
   }
   if (dryRun) {
@@ -1254,7 +1484,7 @@ async function forceModelAnnouncement(
     return `models: would post ${id} (dry, photos: ${photoUrls.join(", ") || "none"})\n---\n${post}`;
   }
   if (!env.TELEGRAM_MODELS_CHAT_ID) return "models: no chat configured";
-  await postModelsMessage(env, post, announcements);
+  await postModelsMessage(env, post, press);
   return `models: force-posted ${id}`;
 }
 
@@ -1370,19 +1600,20 @@ async function runGroup(
   // Shared by the tick's conditional fetches; a source that failed before
   // committing leaves its validator staged, and staged is never saved.
   const validators = await Validators.load(env.RELEASES);
+  const pages: PageMemo = new Map();
   for (const source of sources) {
     if (source.group === group && source.chatId) {
       await run(source.key, () => runFeed(env, source, dryRun, validators));
     }
   }
   if (env.TELEGRAM_MODELS_CHAT_ID) {
-    if (group === "anthropic") await run("models", () => watchAnthropicModels(env, dryRun));
+    if (group === "anthropic") await run("models", () => watchAnthropicModels(env, dryRun, pages));
     if (group === "openai" && env.OPENAI_API_KEY) {
       await run("openai_models", () => watchOpenAiModels(env, dryRun));
     }
   }
   if (group === "anthropic" && env.TELEGRAM_ANTHROPIC_BLOG_CHAT_ID) {
-    await run("blog", () => watchAnthropicBlogs(env, dryRun, validators));
+    await run("blog", () => watchAnthropicBlogs(env, dryRun, validators, pages));
   }
   if (group === "openai" && env.TELEGRAM_OPENAI_BLOG_CHAT_ID) {
     await run("openai_blog", () => watchOpenAiBlog(env, dryRun));

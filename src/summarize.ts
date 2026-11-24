@@ -42,8 +42,12 @@ function compareParts(a: number[], b: number[]): number {
 const MODEL_CACHE_KEY = "resolved_model";
 const MODEL_CACHE_TTL_S = 86400; // re-check daily for a newer model
 
+function modelCacheKey(family: string): string {
+  return family === "opus" ? MODEL_CACHE_KEY : `resolved_model_${family}`;
+}
+
 async function resolveModel(client: Anthropic, kv: KVNamespace, family: string): Promise<string> {
-  const cacheKey = family === "opus" ? MODEL_CACHE_KEY : `resolved_model_${family}`;
+  const cacheKey = modelCacheKey(family);
   const cached = await kv.get(cacheKey);
   if (cached) return cached;
   try {
@@ -136,7 +140,7 @@ export async function structuredFromPrompt<T>(
     // sampling params) — on 400, fall back to the known-good one.
     if (err instanceof Anthropic.BadRequestError && model !== FALLBACK_MODEL) {
       console.log(`${model} rejected the request (${err.message}), falling back to ${FALLBACK_MODEL}`);
-      await kv.put(MODEL_CACHE_KEY, FALLBACK_MODEL, { expirationTtl: MODEL_CACHE_TTL_S });
+      await kv.put(modelCacheKey(family), FALLBACK_MODEL, { expirationTtl: MODEL_CACHE_TTL_S });
       return await complete<T>(client, FALLBACK_MODEL, prompt, schema, webFetch);
     }
     throw err;

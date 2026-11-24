@@ -133,25 +133,42 @@ describe("conditional feeds", () => {
     expect(kv.store.has(VALIDATORS_KEY)).toBe(false);
   });
 
-  it("absorbs an old dated card into the seen-set without posting it", async () => {
-    const now = Date.now();
-    const day = 24 * 60 * 60 * 1000;
+  // 2026-11-09: the Fable 5.2 launch sat in the news index's featured card,
+  // outside /news/, and never reached the channel.
+  it("posts an article the news index links outside its section, absorbs what is not one, asks again about a page that did not answer", async () => {
+    const launch = "https://www.anthropic.com/claude-fable-and-mythos-5-2";
     mocks.fetchAllBlogEntries.mockResolvedValue([
-      { url: "https://www.anthropic.com/claude-fable-and-mythos-5-1", source: "Anthropic News", published: now - day },
-      { url: "https://www.anthropic.com/features/making-of-claude-code", source: "Anthropic News", published: now - 58 * day },
+      { url: launch, source: "Anthropic News", probe: true },
+      { url: "https://www.anthropic.com/science", source: "Anthropic News", probe: true },
+      { url: "https://www.anthropic.com/claude-opus-6", source: "Anthropic News", probe: true },
     ]);
-    mocks.digestBlogPost.mockResolvedValue({ title: "Fable 5.1", tier: "major", bullets: ["a fact"] });
+    mocks.probeArticle.mockImplementation(async (_key, _kv, url: string) =>
+      url === launch ? { page: "<html>launch</html>" } : url.endsWith("/science") ? "absorb" : "retry",
+    );
+    mocks.digestBlogPost.mockResolvedValue({ title: "Fable 5.2", tier: "major", bullets: ["a fact"] });
     const kv = fakeKv({ anthropic_blog_seen: "[]", "youtube_seen:claude": "[]", "youtube_seen:anthropic": "[]" });
     const env = { ...feedEnv(kv), TELEGRAM_CHAT_ID: undefined, TELEGRAM_ANTHROPIC_BLOG_CHAT_ID: "@blogs" };
 
     const result = await runPipeline(env as unknown as Env);
 
-    expect(result).toContain("blog: posted https://www.anthropic.com/claude-fable-and-mythos-5-1 [major], skipped 1 stale");
+    expect(result).toContain(`blog: posted ${launch} [major], absorbed 1 that are not new articles`);
     expect(mocks.sendMessage).toHaveBeenCalledTimes(1);
-    expect(JSON.parse(kv.store.get("anthropic_blog_seen")!)).toEqual([
-      "https://www.anthropic.com/features/making-of-claude-code",
-      "https://www.anthropic.com/claude-fable-and-mythos-5-1",
-    ]);
+    expect(mocks.digestBlogPost.mock.calls[0][3]).toBe("<html>launch</html>");
+    expect(JSON.parse(kv.store.get("anthropic_blog_seen")!)).toEqual(["https://www.anthropic.com/science", launch]);
+  });
+
+  it("opens only a few unknown links a tick when a redesign brings many", async () => {
+    mocks.fetchAllBlogEntries.mockResolvedValue(
+      Array.from({ length: 7 }, (_, i) => ({ url: `https://www.anthropic.com/page-${i}`, source: "Anthropic News", probe: true })),
+    );
+    mocks.probeArticle.mockResolvedValue("absorb");
+    const kv = fakeKv({ anthropic_blog_seen: "[]", "youtube_seen:claude": "[]", "youtube_seen:anthropic": "[]" });
+    const env = { ...feedEnv(kv), TELEGRAM_CHAT_ID: undefined, TELEGRAM_ANTHROPIC_BLOG_CHAT_ID: "@blogs" };
+
+    await runPipeline(env as unknown as Env);
+
+    expect(mocks.probeArticle).toHaveBeenCalledTimes(5);
+    expect(JSON.parse(kv.store.get("anthropic_blog_seen")!)).toHaveLength(5);
   });
 
   it("reports unchanged blog indexes without touching the seen-set", async () => {
@@ -290,6 +307,17 @@ describe("openai model watch", () => {
       OPENAI_API_KEY: "oai-key",
     }) as unknown as Env;
 
+  const feedItem = (title: string, slug: string) => ({
+    title,
+    link: `https://openai.com/index/${slug}`,
+    description: "",
+    guid: `https://openai.com/index/${slug}`,
+    published: now - hour,
+    category: "Product",
+  });
+  const launch = feedItem("Introducing GPT-6.2 Astra and Sol", "gpt-6-2");
+  const pick = (id: string, url: string) => new Map([[id, { url, title: "" }]]);
+
   // 2026-09-29: the feed never listed the GPT-6.1 Sol launch, HN had it at 266
   // points, and the model post went out as the bare id beside the article.
   it("finds a launch the feed never listed on Hacker News", async () => {
@@ -298,6 +326,8 @@ describe("openai model watch", () => {
       { title: "Dots", url: "https://openai.com/index/introducing-dots/", points: 188, createdAt: now - hour },
       { title: "GPT 6.1 Sol", url: `${sol}/`, points: 266, createdAt: now - hour },
     ]);
+    mocks.shortlistAnnouncements.mockResolvedValue(pick("gpt-6.1-sol", sol));
+    mocks.confirmAnnouncement.mockResolvedValue(["gpt-6.1-sol"]);
     mocks.fetchPageMarkdown.mockResolvedValue("# Introducing GPT‑6.1 Sol | OpenAI\n\nToday we're releasing");
     mocks.digestArticle.mockResolvedValue({ tier: "major", bullets: ["a fact"], minutes: 9 });
     const kv = fakeKv({ openai_known_models: "[]" });
@@ -309,6 +339,102 @@ describe("openai model watch", () => {
     expect(mocks.sendMessage.mock.calls[0][2]).toContain(
       `<b><a href="${sol}">Introducing GPT‑6.1 Sol</a></b>\n• a fact`,
     );
+    expect(kv.store.has("openai_model_followups")).toBe(false);
+  });
+
+  // 2026-11-24: gpt-6.2-astra-healthcare went out under the GPT-6.2 launch,
+  // which says nothing about a healthcare edition.
+  it("posts the id alone when the article's text does not announce it, and does not ask about that page again", async () => {
+    mocks.listOpenAiModels.mockResolvedValue([{ id: "gpt-6.2-astra-healthcare", created: 1793404800 }]);
+    mocks.fetchOpenAiNews.mockResolvedValue([launch]);
+    mocks.shortlistAnnouncements.mockResolvedValue(pick("gpt-6.2-astra-healthcare", launch.link));
+    mocks.confirmAnnouncement.mockResolvedValue([]);
+    const kv = fakeKv({ openai_known_models: "[]" });
+
+    await runPipeline(env(kv), { group: "openai" });
+    await runPipeline(env(kv), { group: "openai" });
+
+    expect(mocks.sendMessage).toHaveBeenCalledTimes(1);
+    expect(mocks.sendMessage.mock.calls[0][2]).not.toContain("<a href");
+    expect(mocks.digestArticle).not.toHaveBeenCalled();
+    expect(mocks.shortlistAnnouncements).toHaveBeenCalledTimes(1);
+    expect(mocks.editMessageText).not.toHaveBeenCalled();
+  });
+
+  // 2026-11-17: the API listed gpt-6.2-astra sixteen minutes before the
+  // article was published, and the post stayed bare for good.
+  it("adds the article to the post it went out without, once the article is published", async () => {
+    mocks.listOpenAiModels.mockResolvedValue([{ id: "gpt-6.2-astra", created: 1793404800 }]);
+    mocks.confirmAnnouncement.mockResolvedValue(["gpt-6.2-astra"]);
+    mocks.shortlistAnnouncements.mockResolvedValue(pick("gpt-6.2-astra", launch.link));
+    const kv = fakeKv({ openai_known_models: "[]" });
+
+    await runPipeline(env(kv), { group: "openai" });
+    expect(mocks.sendMessage.mock.calls[0][2]).not.toContain("<a href");
+    expect(mocks.shortlistAnnouncements).not.toHaveBeenCalled();
+
+    mocks.fetchOpenAiNews.mockResolvedValue([launch]);
+    const result = await runPipeline(env(kv), { group: "openai" });
+
+    expect(result).toContain("openai_models: nothing new, added to an earlier post: Introducing GPT-6.2 Astra and Sol");
+    expect(mocks.sendMessage).toHaveBeenCalledTimes(1);
+    expect(mocks.editMessageText.mock.calls[0].slice(1, 3)).toEqual(["@drops", 101]);
+    expect(mocks.editMessageText.mock.calls[0][3]).toContain(
+      `<code>gpt-6.2-astra</code> (2026-10-31)\n\n<b><a href="${launch.link}">Introducing GPT-6.2 Astra and Sol</a></b>\n• a fact`,
+    );
+    expect(kv.store.has("openai_model_followups")).toBe(false);
+  });
+
+  it("stops looking for an article after a few hours", async () => {
+    mocks.listOpenAiModels.mockResolvedValue([{ id: "aurora-red-alpha", created: 0 }]);
+    const stale = { messageId: 101, postedAt: now - 4 * hour, models: [{ id: "aurora-red-alpha", created: 0 }], articles: [], matched: [], asked: [] };
+    const kv = fakeKv({
+      openai_known_models: JSON.stringify(["aurora-red-alpha"]),
+      openai_model_followups: JSON.stringify([stale]),
+    });
+
+    await runPipeline(env(kv), { group: "openai" });
+
+    expect(kv.store.has("openai_model_followups")).toBe(false);
+    expect(mocks.fetchOpenAiNews).not.toHaveBeenCalled();
+  });
+});
+
+describe("anthropic model watch", () => {
+  const fable = { id: "claude-fable-5-2", displayName: "Claude Fable 5.2", createdAt: "2026-11-09T00:00:00Z" };
+  const page = "https://www.anthropic.com/claude-fable-and-mythos-5-2";
+  const env = (kv: FakeKv) =>
+    ({ ...feedEnv(kv), TELEGRAM_CHAT_ID: undefined, TELEGRAM_MODELS_CHAT_ID: "@drops" }) as unknown as Env;
+
+  // 2026-11-09: claude-fable-5-2 was in the API before its launch page was
+  // linked anywhere, and the post stayed bare for good.
+  it("posts a new model at once and adds its article to the same post when the article appears", async () => {
+    mocks.listModels.mockResolvedValue([fable]);
+    mocks.fetchPressCandidates.mockResolvedValue([{ url: "https://www.anthropic.com/news/s1-sec", title: "S-1" }]);
+    mocks.matchPress.mockResolvedValue({ press: [], matched: [], asked: ["https://www.anthropic.com/news/s1-sec"] });
+    const kv = fakeKv({ known_models: "[]" });
+
+    expect(await runPipeline(env(kv), { group: "anthropic" })).toContain("models: posted claude-fable-5-2");
+    expect(mocks.sendMessage.mock.calls[0][2]).not.toContain("<a href");
+
+    mocks.fetchPressCandidates.mockResolvedValue([
+      { url: "https://www.anthropic.com/news/s1-sec", title: "S-1" },
+      { url: page, title: "Introducing Claude Fable 5.2" },
+    ]);
+    mocks.matchPress.mockResolvedValue({
+      press: [{ url: page, title: "Introducing Claude Fable 5.2", bullets: ["a fact"], photos: [] }],
+      matched: ["claude-fable-5-2"],
+      asked: [page],
+    });
+    const result = await runPipeline(env(kv), { group: "anthropic" });
+
+    expect(result).toContain("models: nothing new, added to an earlier post: Introducing Claude Fable 5.2");
+    expect(mocks.matchPress.mock.calls[1][3]).toEqual([{ url: page, title: "Introducing Claude Fable 5.2" }]);
+    expect(mocks.sendMessage).toHaveBeenCalledTimes(1);
+    expect(mocks.editMessageText.mock.calls[0][3]).toContain(
+      `Claude Fable 5.2 (2026-11-09)\n\n<b><a href="${page}">Introducing Claude Fable 5.2</a></b>\n• a fact`,
+    );
+    expect(kv.store.has("model_followups")).toBe(false);
   });
 });
 
@@ -703,6 +829,12 @@ const mocks = vi.hoisted(() => ({
   summarize: vi.fn(),
   fetchIncidents: vi.fn(),
   fetchAllBlogEntries: vi.fn(),
+  probeArticle: vi.fn(),
+  shortlistAnnouncements: vi.fn(),
+  confirmAnnouncement: vi.fn(),
+  listModels: vi.fn(),
+  fetchPressCandidates: vi.fn(),
+  matchPress: vi.fn(),
   digestBlogPost: vi.fn(),
   digestArticle: vi.fn(),
   fetchPageMarkdown: vi.fn(),
@@ -743,8 +875,20 @@ vi.mock("../src/status", async (importOriginal) => ({
 vi.mock("../src/blogs", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/blogs")>()),
   fetchAllBlogEntries: mocks.fetchAllBlogEntries,
+  probeArticle: mocks.probeArticle,
   digestBlogPost: mocks.digestBlogPost,
   digestArticle: mocks.digestArticle,
+}));
+vi.mock("../src/announcement", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/announcement")>()),
+  shortlistAnnouncements: mocks.shortlistAnnouncements,
+  confirmAnnouncement: mocks.confirmAnnouncement,
+}));
+vi.mock("../src/models", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../src/models")>()),
+  listModels: mocks.listModels,
+  fetchPressCandidates: mocks.fetchPressCandidates,
+  matchPress: mocks.matchPress,
 }));
 vi.mock("../src/browser", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../src/browser")>()),

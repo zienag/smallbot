@@ -1,14 +1,19 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { decodeHTML } from "entities";
+import { type Candidate, confirmAnnouncement, shortlistAnnouncements } from "./announcement";
 import { warn } from "./health";
-import { BOT_UA, articleText, pageTitle } from "./html";
+import { BOT_UA, type PageMemo, articleText, pageLinks, pageTitle } from "./html";
 import { structuredFromPrompt, summaryFromPrompt } from "./summarize";
 import { escapeHtml, formatInline } from "./telegram";
 
 export const KNOWN_MODELS_KEY = "known_models";
-const NEWS_BASE = "https://www.anthropic.com/news";
-export const SITEMAP_URL = "https://www.anthropic.com/sitemap.xml";
+export const MODEL_FOLLOWUPS_KEY = "model_followups";
+const ORIGIN = "https://www.anthropic.com";
+const NEWS_INDEX_URL = `${ORIGIN}/news`;
+const SITEMAP_URL = `${ORIGIN}/sitemap.xml`;
 const PRESS_TEXT_LIMIT = 12000;
+// A featured card's anchor wraps its whole teaser.
+const CANDIDATE_TITLE_LIMIT = 160;
 
 export interface ModelInfo {
   id: string;
@@ -35,9 +40,11 @@ export interface PressRelease {
   images: ArticleImage[];
 }
 
-export interface ModelAnnouncement {
-  model: ModelInfo;
-  press?: { url: string; title: string; bullets: string[]; photos: FetchedImage[] };
+export interface PressDigest {
+  url: string;
+  title: string;
+  bullets: string[];
+  photos: FetchedImage[];
 }
 
 /** One plain GET, like the OpenAI side: the SDK's request machinery costs a tick CPU it can skip. */
@@ -52,71 +59,40 @@ export async function listModels(apiKey: string): Promise<ModelInfo[]> {
   return body.data.map((m) => ({ id: m.id, displayName: m.display_name, createdAt: m.created_at }));
 }
 
-/** Dated snapshots don't get press releases — only aliases are enriched. */
+/** Dated snapshots ride on their alias's article and are never matched themselves. */
 export function isDatedSnapshot(id: string): boolean {
   return /-\d{8}$/.test(id);
 }
 
 /**
- * Point releases are announced at /news/<alias> (verified: claude-opus-4-8,
- * claude-sonnet-4-5, claude-haiku-4-5, claude-opus-4-1). Family launches use a
- * combined slug, found via sitemap.xml — the /news index only shows recent
- * posts so announcements age out of it fast, while the sitemap is complete —
- * and not always under /news/: the Fable 5.1 launch lives at
- * /claude-fable-and-mythos-5-1. A slug matches when it carries the family
- * token and exactly the model's version: `5-1` is not `5`, or the 5.1 model
- * would pick up the Fable 5 launch page, as it did on 2026-09-01. /news/
- * slugs beat top-level ones, then the freshest lastmod wins; `/news/claude-N`
- * is the family launch of a major without its own page.
+ * Where a launch article can turn up, for the matcher to choose from. The news
+ * index features a launch the day it ships, under any address (the Fable 5.2
+ * page is /claude-fable-and-mythos-5-2, outside /news/). The sitemap is
+ * complete but hours late — that page was not in it half an hour after launch —
+ * and has no titles, so it contributes the addresses that carry a new model's
+ * family name: the index only shows recent posts, and a model can reach the
+ * API long after its article has rotated out.
  */
-export async function findPressRelease(
-  modelId: string,
-  fetchPage: (url: string) => Promise<string | null> = fetchOk,
-): Promise<PressRelease | null> {
-  const direct = toPress(`${NEWS_BASE}/${modelId}`, await fetchPage(`${NEWS_BASE}/${modelId}`));
-  if (direct) return direct;
-
-  const m = modelId.match(/^claude-([a-z]+)-(\d+(?:-\d+)*)$/);
-  if (!m) return null;
-  const [, family, version] = m;
-  const major = version.split("-")[0];
-  const sitemap = await fetchPage(SITEMAP_URL);
-  if (!sitemap) return null;
-  const matches: { url: string; lastmod: string; news: boolean }[] = [];
-  for (const [, block] of sitemap.matchAll(/<url>([\s\S]*?)<\/url>/g)) {
-    const url = block.match(/<loc>([^<]+)<\/loc>/)?.[1];
-    if (!url) continue;
-    const slug = url.replace(/^https:\/\/www\.anthropic\.com/, "");
-    const news = slug.startsWith("/news/");
-    const path = news ? slug.slice("/news/".length) : slug.slice(1);
-    if (path.includes("/") || !path.startsWith("claude")) continue;
-    if (!(slugNamesVersion(path, family, version) || (news && path === `claude-${major}`))) continue;
-    matches.push({ url, lastmod: block.match(/<lastmod>([^<]+)<\/lastmod>/)?.[1] ?? "", news });
+export function pressCandidates(models: ModelInfo[], newsHtml: string | null, sitemap: string | null): Candidate[] {
+  const out = new Map<string, Candidate>();
+  for (const link of newsHtml ? pageLinks(newsHtml, ORIGIN) : []) {
+    if (link.url === ORIGIN || link.url === NEWS_INDEX_URL) continue;
+    out.set(link.url, { url: link.url, title: link.text.slice(0, CANDIDATE_TITLE_LIMIT) });
   }
-  const best = matches.sort(
-    (a, b) => Number(b.news) - Number(a.news) || b.lastmod.localeCompare(a.lastmod),
-  )[0];
-  if (!best) {
-    console.log(`no press release found for ${modelId}`);
-    return null;
+  const families = new Set(models.map((m) => m.id.match(/^claude-([a-z]+)-/)?.[1]).filter(Boolean));
+  for (const [, url] of sitemap?.matchAll(/<loc>([^<]+)<\/loc>/g) ?? []) {
+    if (out.has(url) || !url.startsWith(`${ORIGIN}/`)) continue;
+    const tokens = url.slice(ORIGIN.length).split(/[/-]/);
+    if (tokens.some((t) => families.has(t))) out.set(url, { url, title: "" });
   }
-  return toPress(best.url, await fetchPage(best.url));
+  return [...out.values()];
 }
 
-/** The slug's numeric runs, each taken whole: `fable-5-mythos-5` has `5` and `5`, never `5-1`. */
-export function slugNamesVersion(slug: string, family: string, version: string): boolean {
-  const tokens = slug.split("-");
-  if (!tokens.includes(family)) return false;
-  const runs: string[] = [];
-  let run: string[] = [];
-  for (const t of [...tokens, ""]) {
-    if (/^\d+$/.test(t)) run.push(t);
-    else if (run.length > 0) {
-      runs.push(run.join("-"));
-      run = [];
-    }
-  }
-  return runs.includes(version);
+/** The news index and the sitemap; either may be missing, the other still serves. */
+export async function fetchPressCandidates(models: ModelInfo[], pages: PageMemo): Promise<Candidate[]> {
+  const news = await fetchOk(NEWS_INDEX_URL);
+  if (news) pages.set(NEWS_INDEX_URL, news);
+  return pressCandidates(models, news, await fetchOk(SITEMAP_URL));
 }
 
 function toPress(url: string, page: string | null): PressRelease | null {
@@ -254,56 +230,64 @@ each bullet under 12 words, the whole digest under 400 characters. Telegraphic \
 style is fine — drop filler words. Write model names as plain text (no \
 backticks or code formatting). Write in English.`;
 
-/**
- * For each new model, tries to find and summarize its press release; any
- * enrichment error is swallowed — the announcement matters more. One press
- * release is never duplicated across models of the same run.
- */
-export async function buildAnnouncements(
-  apiKey: string,
-  kv: KVNamespace,
-  fresh: ModelInfo[],
-): Promise<ModelAnnouncement[]> {
-  const announcements: ModelAnnouncement[] = [];
-  const seenUrls = new Set<string>();
-  for (const model of fresh) {
-    let press: ModelAnnouncement["press"];
-    if (!isDatedSnapshot(model.id)) {
-      try {
-        const found = await findPressRelease(model.id);
-        if (found && !seenUrls.has(found.url)) {
-          seenUrls.add(found.url);
-          const summary = await summaryFromPrompt(apiKey, kv, PRESS_PROMPT(found.text));
-          summary.bullets = summary.bullets.slice(0, 4);
-          let photos: FetchedImage[] = [];
-          try {
-            photos = await pickImportantImages(apiKey, kv, found.title, await fetchImages(found.images));
-          } catch (err) {
-            warn(`image selection failed for ${model.id}: ${err}`);
-          }
-          press = { url: found.url, title: found.title, bullets: summary.bullets, photos };
-        }
-      } catch (err) {
-        warn(`press release lookup failed for ${model.id}: ${err}`);
-      }
-    }
-    announcements.push({ model, press });
-  }
-  return announcements;
+export interface PressMatch {
+  press: PressDigest[];
+  matched: string[]; // ids an attached article announces
+  asked: string[]; // candidates that got a verdict; a page that would not load is asked again
 }
 
-export function formatNewModelsPost(announcements: ModelAnnouncement[]): string {
-  const lines = announcements.map(({ model }) => {
+/**
+ * The articles that announce `models`, among `candidates`. A page is attached
+ * only once its own text was read and names the model. Photos are for a first
+ * post; an edit of a text message cannot carry them.
+ */
+export async function matchPress(
+  apiKey: string,
+  kv: KVNamespace,
+  models: ModelInfo[],
+  candidates: Candidate[],
+  withPhotos: boolean,
+  fetchPage: (url: string) => Promise<string | null> = fetchOk,
+): Promise<PressMatch> {
+  const out: PressMatch = { press: [], matched: [], asked: [] };
+  const refs = models.map((m) => ({ id: m.id, name: m.displayName }));
+  if (refs.length === 0 || candidates.length === 0) return out;
+  const picks = await shortlistAnnouncements(apiKey, kv, "Anthropic", refs, candidates);
+  const unread = new Set<string>();
+  for (const url of new Set([...picks.values()].map((c) => c.url))) {
+    const open = refs.filter((m) => !out.matched.includes(m.id));
+    const found = open.length > 0 ? toPress(url, await fetchPage(url)) : null;
+    if (!found) {
+      unread.add(url);
+      continue;
+    }
+    const announced = await confirmAnnouncement(apiKey, kv, "Anthropic", open, found);
+    if (announced.length === 0) continue;
+    const summary = await summaryFromPrompt(apiKey, kv, PRESS_PROMPT(found.text));
+    let photos: FetchedImage[] = [];
+    if (withPhotos) {
+      try {
+        photos = await pickImportantImages(apiKey, kv, found.title, await fetchImages(found.images));
+      } catch (err) {
+        warn(`image selection failed for ${url}: ${err}`);
+      }
+    }
+    out.press.push({ url: found.url, title: found.title, bullets: summary.bullets.slice(0, 4), photos });
+    out.matched.push(...announced);
+  }
+  out.asked = candidates.map((c) => c.url).filter((url) => !unread.has(url));
+  return out;
+}
+
+export function formatNewModelsPost(models: ModelInfo[], press: Omit<PressDigest, "photos">[] = []): string {
+  const lines = models.map((model) => {
     const date = model.createdAt ? ` (${model.createdAt.slice(0, 10)})` : "";
     return `• <code>${escapeHtml(model.id)}</code> — ${escapeHtml(model.displayName)}${date}`;
   });
   const sections = [`<b>New models in the Anthropic API</b>\n\n${lines.join("\n")}`];
-  for (const { press } of announcements) {
-    if (!press) continue;
+  for (const p of press) {
     sections.push(
-      `<b><a href="${press.url}">${escapeHtml(press.title)}</a></b>\n${press.bullets
-        .map((b) => `• ${formatInline(b)}`)
-        .join("\n")}`,
+      `<b><a href="${p.url}">${escapeHtml(p.title)}</a></b>\n${p.bullets.map((b) => `• ${formatInline(b)}`).join("\n")}`,
     );
   }
   return sections.join("\n\n");

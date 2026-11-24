@@ -1,72 +1,21 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
-  PICK_PROMPT,
-  findAnnouncement,
+  announcementCandidates,
   formatNewOpenAiModelsPost,
   isDatedSnapshot,
   listOpenAiModels,
-  pickAnnouncement,
   withHnArticles,
 } from "../src/openai_models";
 
-describe("findAnnouncement", () => {
-  it("matches the launch that names the exact model", () => {
-    expect(findAnnouncement("gpt-5.6-sol", FEED)?.title).toBe(
-      "Previewing GPT-5.6 Sol: a next-generation model",
-    );
-  });
-
-  it("falls back to the family launch for a variant that has no post of its own", () => {
-    expect(findAnnouncement("gpt-5.6-luna", FEED)?.title).toBe(
-      "GPT-5.6: Frontier intelligence that scales with your ambition",
-    );
-  });
-
-  it("takes the launch, not a later post reusing the name", () => {
-    expect(findAnnouncement("gpt-5.6", FEED)?.title).toBe(
-      "GPT-5.6: Frontier intelligence that scales with your ambition",
-    );
-  });
-
-  it("ignores a post that only mentions the model mid-title", () => {
-    const retrospective = FEED.filter((i) => i.title.startsWith("How GPT-5.6"));
-    expect(retrospective).toHaveLength(1);
-    expect(findAnnouncement("gpt-5.6", retrospective)).toBeNull();
-  });
-
-  it("does not let a shorter id match a longer version", () => {
-    expect(findAnnouncement("gpt-5", FEED)).toBeNull();
-  });
-
-  it("skips system cards", () => {
-    expect(findAnnouncement("gpt-5.5", [item("GPT-5.5 System Card")])).toBeNull();
-  });
-
-  it("never enriches a dated snapshot", () => {
-    expect(findAnnouncement("gpt-5.5-2026-04-23", FEED)).toBeNull();
-  });
-
-  it("does not reach past the recency window into the feed's history", () => {
-    expect(findAnnouncement("gpt-5.9", [item("Introducing GPT-5.9", 50 * DAY)])).toBeNull();
-    expect(findAnnouncement("gpt-5.9", [item("Introducing GPT-5.9", 40 * DAY)])?.title).toBe(
-      "Introducing GPT-5.9",
-    );
-    expect(findAnnouncement("gpt-5.9", [{ ...item("Introducing GPT-5.9"), published: null }])).toBeNull();
-  });
-
-  it("falls back to a sibling's launch when nothing names the model or its family plainly", () => {
-    expect(findAnnouncement("gpt-6-sol", GPT6_FEED)?.title).toBe(
-      "GPT-6 Astra: A new generation of intelligence",
-    );
-    expect(findAnnouncement("gpt-6-luna", GPT6_FEED)?.title).toBe(
-      "GPT-6 Astra: A new generation of intelligence",
-    );
-  });
-
-  it("reads the non-breaking hyphen the newsroom writes as the id's hyphen", () => {
-    expect(findAnnouncement("gpt-5.9", [item("Introducing GPT‑5.9")])?.title).toBe(
-      "Introducing GPT‑5.9",
-    );
+describe("announcementCandidates", () => {
+  it("offers the recent items, oldest first, and leaves the feed's history out", () => {
+    const feed = [item("Newest", DAY), item("Launch", 40 * DAY), item("History", 50 * DAY), { ...item("Undated"), published: null }];
+    expect(announcementCandidates(feed).map((c) => c.title)).toEqual(["Launch", "Newest"]);
+    expect(announcementCandidates(feed)[1]).toEqual({
+      url: "https://openai.com/index/newest",
+      title: "Newest",
+      detail: `${new Date(Date.now() - DAY).toISOString().slice(0, 10)} · One sentence from the feed.`,
+    });
   });
 });
 
@@ -81,44 +30,9 @@ describe("withHnArticles", () => {
     { ...item("Introducing OpenAI", 3650 * DAY), link: "https://openai.com/index/introducing-openai/" },
   ];
 
-  it("lets the model watch find a launch only Hacker News carries", () => {
-    expect(findAnnouncement("gpt-6.1-sol", feed)).toBeNull();
-    const merged = withHnArticles(feed, [old, sol, dots], "https://openai.com");
-    expect(findAnnouncement("gpt-6.1-sol", merged)?.link).toBe(sol.url);
-  });
-
   it("adds only what the feed does not carry, newest first like the feed", () => {
     const merged = withHnArticles(feed, [old, sol, dots], "https://openai.com");
     expect(merged.map((i) => i.title)).toEqual(["GPT 6.1 Sol", "Dots", "Unrelated", "Introducing OpenAI"]);
-  });
-});
-
-describe("pickAnnouncement", () => {
-  afterEach(() => mocks.structuredFromPrompt.mockReset());
-
-  it("hands the model the recent candidates, oldest first, and returns the one it numbers", async () => {
-    mocks.structuredFromPrompt.mockResolvedValue({ index: 2 });
-    const feed = [item("Introducing ChatGPT Images 2.5", 1 * DAY), item("Unrelated", 2 * DAY)];
-    expect((await pickAnnouncement("k", KV, "gpt-image-2.5-flare", feed))?.title).toBe(
-      "Introducing ChatGPT Images 2.5",
-    );
-    const [, , prompt, , family] = mocks.structuredFromPrompt.mock.calls[0];
-    expect(family).toBe("sonnet");
-    expect(prompt).toBe(PICK_PROMPT("gpt-image-2.5-flare", [feed[1], feed[0]]));
-    expect(prompt).toContain("1. Unrelated");
-    expect(prompt).toContain("2. Introducing ChatGPT Images 2.5");
-  });
-
-  it("returns nothing on 0 or a number outside the list", async () => {
-    mocks.structuredFromPrompt.mockResolvedValueOnce({ index: 0 }).mockResolvedValueOnce({ index: 3 });
-    expect(await pickAnnouncement("k", KV, "gpt-live-1", [item("A"), item("B")])).toBeNull();
-    expect(await pickAnnouncement("k", KV, "gpt-live-1", [item("A"), item("B")])).toBeNull();
-  });
-
-  it("does not ask for a dated snapshot or when the window is empty", async () => {
-    expect(await pickAnnouncement("k", KV, "gpt-5.5-2026-04-23", [item("Introducing GPT-5.5")])).toBeNull();
-    expect(await pickAnnouncement("k", KV, "gpt-5.9", [item("Introducing GPT-5.9", 50 * DAY)])).toBeNull();
-    expect(mocks.structuredFromPrompt).not.toHaveBeenCalled();
   });
 });
 
@@ -177,10 +91,6 @@ describe("isDatedSnapshot", () => {
   });
 });
 
-const mocks = vi.hoisted(() => ({ structuredFromPrompt: vi.fn() }));
-vi.mock("../src/summarize", () => ({ structuredFromPrompt: mocks.structuredFromPrompt }));
-const KV = {} as KVNamespace;
-
 const DAY = 24 * 60 * 60 * 1000;
 
 function item(title: string, age = DAY) {
@@ -194,27 +104,3 @@ function item(title: string, age = DAY) {
     category: "Product",
   };
 }
-
-// Real titles from openai.com/news/rss.xml, newest first as the feed serves them.
-const FEED = [
-  item("How enabling two settings tripled our scores on the ARC-AGI-3 benchmark"),
-  item("How GPT-5.6 fuses frontier intelligence with frontier efficiency"),
-  item("GPT-5.6 is now the preferred model in Microsoft 365 Copilot"),
-  item("GPT-5.6: Frontier intelligence that scales with your ambition"),
-  item("Previewing GPT-5.6 Sol: a next-generation model"),
-  item("GPT-5.5 System Card"),
-  item("Introducing GPT-5.5"),
-];
-
-// The feed on 2026-09-22, when gpt-6-sol and gpt-6-luna appeared in the API:
-// GPT-6 launched as "GPT-6 Astra" nineteen days earlier and no post names
-// GPT-6 without the codename.
-const GPT6_FEED = [
-  item("Higgsfield AI ships new video features in a day with GPT-6 Astra", 1 * DAY),
-  item("Hex turns complex analysis into visual reports with GPT‑6 Astra", 6 * DAY),
-  item("Perplexity trusts GPT-6 Astra with end-to-end systems", 8 * DAY),
-  item("GPT-6 Astra: The next generation in intelligence for work", 13 * DAY),
-  item("How GPT-5.6 Sol helps run quantum computing experiments", 14 * DAY),
-  item("GPT-6 Astra: A new generation of intelligence", 19 * DAY),
-  item("Safety overview: GPT-6 Astra", 19 * DAY),
-];

@@ -5,10 +5,9 @@ import { parseReleasesAtom } from "../src/codex";
 import { articleText, htmlToText, pageTitle } from "../src/html";
 import {
   articleImages,
-  findPressRelease,
   formatNewModelsPost,
   isDatedSnapshot,
-  slugNamesVersion,
+  pressCandidates,
 } from "../src/models";
 import { formatOpenAiModelPost, parseRss } from "../src/openai_news";
 import { compareVersions } from "../src/version";
@@ -147,9 +146,7 @@ describe("htmlToText", () => {
 describe("formatNewModelsPost", () => {
   it("lists ids as code with display name and date", () => {
     const post = formatNewModelsPost([
-      {
-        model: { id: "claude-fable-5", displayName: "Fable 5 <new>", createdAt: "2026-05-30T00:00:00Z" },
-      },
+      { id: "claude-fable-5", displayName: "Fable 5 <new>", createdAt: "2026-05-30T00:00:00Z" },
     ]);
     expect(post).toContain("<b>New models in the Anthropic API</b>");
     expect(post).toContain("• <code>claude-fable-5</code> — Fable 5 &lt;new&gt; (2026-05-30)");
@@ -157,17 +154,16 @@ describe("formatNewModelsPost", () => {
   });
 
   it("appends a press release section with linked title and bullets", () => {
-    const post = formatNewModelsPost([
-      {
-        model: { id: "claude-fable-5", displayName: "Fable 5", createdAt: "" },
-        press: {
+    const post = formatNewModelsPost(
+      [{ id: "claude-fable-5", displayName: "Fable 5", createdAt: "" }],
+      [
+        {
           url: "https://www.anthropic.com/news/claude-fable-5-mythos-5",
           title: "Introducing Claude Fable 5",
           bullets: ["ships `claude-fable-5`"],
-          photos: [],
         },
-      },
-    ]);
+      ],
+    );
     expect(post).toContain("• <code>claude-fable-5</code> — Fable 5\n");
     expect(post).toContain(
       '<b><a href="https://www.anthropic.com/news/claude-fable-5-mythos-5">Introducing Claude Fable 5</a></b>\n• ships <code>claude-fable-5</code>',
@@ -183,90 +179,33 @@ describe("isDatedSnapshot", () => {
   });
 });
 
-describe("findPressRelease", () => {
-  const page = (title: string) =>
-    `<html><head><title>${title} \\ Anthropic</title></head><body><article><p>Body text</p></article></body></html>`;
+describe("pressCandidates", () => {
+  const sitemapEntry = (path: string) => `<url><loc>https://www.anthropic.com${path}</loc></url>`;
+  const fable = { id: "claude-fable-5-2", displayName: "Claude Fable 5.2", createdAt: "" };
 
-  it("uses the direct /news/<alias> slug when it resolves", async () => {
-    const press = await findPressRelease("claude-opus-4-8", async (url) =>
-      url === "https://www.anthropic.com/news/claude-opus-4-8" ? page("Introducing Claude Opus 4.8") : null,
-    );
-    expect(press).toEqual({
-      url: "https://www.anthropic.com/news/claude-opus-4-8",
-      title: "Introducing Claude Opus 4.8",
-      text: "Body text",
-      images: [],
-    });
+  // 2026-11-09: the news index featured the launch with its address written in
+  // full, and the sitemap did not carry the page until hours later.
+  it("offers what the news index links, however the address is written, with the anchor's text", () => {
+    const news =
+      '<a href="/news">News</a><a href="/">Home</a>' +
+      '<a href="https://www.anthropic.com/claude-fable-and-mythos-5-2"><h2>Introducing Claude Fable 5.2</h2></a>' +
+      '<a href="/news/s1-sec">Anthropic files S-1</a><a href="https://x.com/AnthropicAI">X</a>';
+    expect(pressCandidates([fable], news, null)).toEqual([
+      { url: "https://www.anthropic.com/claude-fable-and-mythos-5-2", title: "Introducing Claude Fable 5.2" },
+      { url: "https://www.anthropic.com/news/s1-sec", title: "Anthropic files S-1" },
+    ]);
   });
 
-  const sitemapEntry = (slug: string, lastmod: string) =>
-    `<url><loc>https://www.anthropic.com${slug}</loc><lastmod>${lastmod}</lastmod></url>`;
-
-  it("falls back to the sitemap for family-launch slugs, preferring fresh lastmod", async () => {
+  it("adds the sitemap pages that carry the model's family name, for an article the index no longer shows", () => {
     const sitemap =
-      sitemapEntry("/news/redeploying-fable-5", "2026-07-01") +
-      sitemapEntry("/news/fable-safeguards", "2026-06-01") +
-      sitemapEntry("/news/claude-fable-5-hardening", "2026-01-01") +
-      sitemapEntry("/news/claude-fable-5-mythos-5", "2026-05-30");
-    const press = await findPressRelease("claude-fable-5", async (url) => {
-      if (url === "https://www.anthropic.com/sitemap.xml") return sitemap;
-      if (url === "https://www.anthropic.com/news/claude-fable-5-mythos-5") return page("Introducing Fable 5");
-      return null;
-    });
-    expect(press?.url).toBe("https://www.anthropic.com/news/claude-fable-5-mythos-5");
-    expect(press?.title).toBe("Introducing Fable 5");
-  });
-
-  it("matches bare claude-<major> family slugs and gives up cleanly", async () => {
-    const press = await findPressRelease("claude-opus-4", async (url) => {
-      if (url === "https://www.anthropic.com/sitemap.xml") return sitemapEntry("/news/claude-4", "2025-05-22");
-      if (url === "https://www.anthropic.com/news/claude-4") return page("Introducing Claude 4");
-      return null;
-    });
-    expect(press?.url).toBe("https://www.anthropic.com/news/claude-4");
-    expect(await findPressRelease("claude-opus-4", async () => null)).toBeNull();
-  });
-
-  it("a point release never takes its major's launch page, and finds its own outside /news/", async () => {
-    const sitemap =
-      sitemapEntry("/news/claude-fable-5-mythos-5", "2026-07-01") +
-      sitemapEntry("/claude-fable-and-mythos-5-1", "2026-09-01") +
-      sitemapEntry("/claude-fable-5-1-system-card/appendix", "2026-09-01");
-    const fetchPage = async (url: string) => {
-      if (url === "https://www.anthropic.com/sitemap.xml") return sitemap;
-      if (url === "https://www.anthropic.com/claude-fable-and-mythos-5-1") return page("Introducing Claude Fable 5.1");
-      if (url === "https://www.anthropic.com/news/claude-fable-5-mythos-5") return page("Claude Fable 5 and Claude Mythos 5");
-      return null;
-    };
-    expect((await findPressRelease("claude-fable-5-1", fetchPage))?.url).toBe(
-      "https://www.anthropic.com/claude-fable-and-mythos-5-1",
-    );
-    expect((await findPressRelease("claude-fable-5", fetchPage))?.url).toBe(
+      sitemapEntry("/news/claude-fable-5-mythos-5") +
+      sitemapEntry("/claude-fable-and-mythos-5-1") +
+      sitemapEntry("/news/claude-opus-4-8") +
+      sitemapEntry("/news/affable-partnership");
+    expect(pressCandidates([fable], null, sitemap).map((c) => c.url)).toEqual([
       "https://www.anthropic.com/news/claude-fable-5-mythos-5",
-    );
-  });
-
-  it("prefers a /news/ page over a top-level one for the same version", async () => {
-    const sitemap =
-      sitemapEntry("/claude-opus-6", "2027-01-02") + sitemapEntry("/news/claude-opus-6-launch", "2027-01-01");
-    const press = await findPressRelease("claude-opus-6", async (url) => {
-      if (url === "https://www.anthropic.com/sitemap.xml") return sitemap;
-      if (url.startsWith("https://www.anthropic.com/news/claude-opus-6-launch")) return page("Opus 6");
-      if (url === "https://www.anthropic.com/claude-opus-6") return page("Opus 6 product page");
-      return null;
-    });
-    expect(press?.url).toBe("https://www.anthropic.com/news/claude-opus-6-launch");
-  });
-});
-
-describe("slugNamesVersion", () => {
-  it("takes numeric runs whole", () => {
-    expect(slugNamesVersion("claude-fable-and-mythos-5-1", "fable", "5-1")).toBe(true);
-    expect(slugNamesVersion("claude-fable-and-mythos-5-1", "fable", "5")).toBe(false);
-    expect(slugNamesVersion("claude-fable-5-mythos-5", "fable", "5")).toBe(true);
-    expect(slugNamesVersion("claude-fable-5-mythos-5", "fable", "5-1")).toBe(false);
-    expect(slugNamesVersion("claude-opus-4-8", "opus", "4-8")).toBe(true);
-    expect(slugNamesVersion("claude-sonnet-4-5", "opus", "4-5")).toBe(false);
+      "https://www.anthropic.com/claude-fable-and-mythos-5-1",
+    ]);
   });
 });
 

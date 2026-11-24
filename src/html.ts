@@ -55,3 +55,30 @@ export function pageTitle(page: string): string | null {
   if (!raw) return null;
   return decodeHTML(raw).split(/\s*[\\|]\s*/)[0].trim() || null;
 }
+
+/** Pages already downloaded in this tick, by url: the news index is 650 KB and two watches read it. */
+export type PageMemo = Map<string, string>;
+
+export interface PageLink {
+  url: string; // absolute, without query or fragment
+  text: string; // the anchor's visible text, "" for an image card
+}
+
+/**
+ * Every link of a page that stays on `origin`, in page order. Links carrying a
+ * query are dropped (pagination, filters); a link met twice keeps the first
+ * text that is not empty.
+ */
+export function pageLinks(page: string, origin: string): PageLink[] {
+  const out = new Map<string, PageLink>();
+  for (const [, href, body] of page.matchAll(/<a\s[^>]*href="([^"#?]+)"[^>]*>([\s\S]*?)<\/a>/g)) {
+    const path = href.startsWith(origin) ? href.slice(origin.length) : href;
+    if (path !== "" && (!path.startsWith("/") || path.startsWith("//"))) continue;
+    const url = origin + path.replace(/\/+$/, "");
+    const text = flatten(body);
+    const known = out.get(url);
+    if (!known) out.set(url, { url, text });
+    else if (!known.text) known.text = text;
+  }
+  return [...out.values()];
+}
